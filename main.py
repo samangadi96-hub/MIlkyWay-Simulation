@@ -10,7 +10,7 @@ from camera import Camera
 import glm
 from lod import LODManager
 from renderer import Renderer
-from galaxy import GalacticBulge
+from galaxy import GalacticBulge, GalacticBar
 from galactic_disk import GalacticDisk
 from nebula import NebulaManager
 
@@ -33,6 +33,7 @@ class MilkyWaySimulation(mglw.WindowConfig):
         self.camera      = Camera()
         self.lod_manager = LODManager()
         self.bulge       = GalacticBulge(self.ctx, Path(__file__).parent)
+        self.bar         = GalacticBar(self.ctx, Path(__file__).parent)
         self.nebula_mgr  = NebulaManager()
         self.galactic_disk = GalacticDisk(self.ctx, Path(__file__).parent, nebula_stars=self.nebula_mgr.get_stars_array())
         
@@ -428,7 +429,7 @@ class MilkyWaySimulation(mglw.WindowConfig):
         self.galaxy_rotation_angle += frametime * 0.05
         
         print(
-            f"Stars: {self.bulge.num_stars + self.galactic_disk.num_stars} "
+            f"Stars: {self.bulge.num_stars + self.bar.num_stars + self.galactic_disk.num_stars} "
             f"Bulge vis: {lod_state['bulge_visibility']:.2f} "
             f"Galaxy Rot: {self.galaxy_rotation_angle:.2f} "
             f"Dist: {self.camera.absolute_distance:.1f} "
@@ -615,6 +616,12 @@ class MilkyWaySimulation(mglw.WindowConfig):
             star_visibility = local_vis
         
         self.galactic_disk.render(
+            self.camera, 
+            bh.aspect_ratio, 
+            star_visibility, 
+            self.galaxy_rotation_angle
+        )
+        self.bar.render(
             self.camera, 
             bh.aspect_ratio, 
             star_visibility, 

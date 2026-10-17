@@ -3,9 +3,11 @@ import moderngl
 import glm
 
 class GalacticDisk:
-    def __init__(self, ctx, base_dir, nebula_stars=None):
+    def __init__(self, ctx, base_dir, nebula_stars=None, seed=42, diagnostic_mode=False):
         self.ctx = ctx
         self.num_stars = 2000000
+        self.seed = seed
+        self.diagnostic_mode = diagnostic_mode
         
         # Load shaders (reusing bulge shaders for now, but they will have u_galaxyAngle)
         with open(base_dir / "shaders" / "bulge_vert.glsl", encoding="utf-8") as f:
@@ -17,6 +19,8 @@ class GalacticDisk:
             vertex_shader=vert_code,
             fragment_shader=frag_code,
         )
+        
+        rng = np.random.default_rng(self.seed)
         
         # ==========================================================
         # Spiral Galaxy Parameters
@@ -34,12 +38,12 @@ class GalacticDisk:
         # 1. Generate Radii
         # Use Gamma distribution (shape=2) to get probability P(r) ~ r * exp(-r / DISK_SCALE)
         # This accounts for increasing circumference area at larger radii.
-        radius = np.random.gamma(shape=2.0, scale=DISK_SCALE, size=self.num_stars)
+        radius = rng.gamma(shape=2.0, scale=DISK_SCALE, size=self.num_stars)
         
         # Truncate via rejection sampling instead of clipping to avoid artificial rings
         invalid = (radius < INNER_RADIUS) | (radius > OUTER_RADIUS)
         while np.any(invalid):
-            radius[invalid] = np.random.gamma(shape=2.0, scale=DISK_SCALE, size=np.sum(invalid))
+            radius[invalid] = rng.gamma(shape=2.0, scale=DISK_SCALE, size=np.sum(invalid))
             invalid = (radius < INNER_RADIUS) | (radius > OUTER_RADIUS)
         
         # 2. Determine Arm vs Inter-arm Population (Density Waves)
@@ -52,20 +56,20 @@ class GalacticDisk:
         
         # Probability of a star belonging to an arm
         p_arm = ARM_STRENGTH * arm_strength
-        is_arm = np.random.random(self.num_stars) < p_arm
+        is_arm = rng.random(self.num_stars) < p_arm
         
         # 3. Calculate Angles
         theta = np.zeros(self.num_stars)
         
         # Inter-arm stars: uniformly distributed in angle
-        theta[~is_arm] = np.random.uniform(0, 2 * np.pi, np.sum(~is_arm))
+        theta[~is_arm] = rng.uniform(0.0, 2.0 * np.pi, np.sum(~is_arm))
         
         # Arm stars: distributed along logarithmic spirals
         num_arm_stars = np.sum(is_arm)
         
         # Slightly vary density between arms to make it less perfect
         arm_probs = np.array([0.27, 0.23, 0.26, 0.24])
-        arm_indices = np.random.choice(ARM_COUNT, p=arm_probs, size=num_arm_stars)
+        arm_indices = rng.choice(ARM_COUNT, p=arm_probs, size=num_arm_stars)
         arm_base_angles = arm_indices * (2 * np.pi / ARM_COUNT)
         
         # Base logarithmic spiral angle: theta = theta0 + b * log(r / r0)
@@ -74,9 +78,8 @@ class GalacticDisk:
         # Slightly vary width between arms
         arm_widths = np.array([1.0, 1.1, 0.9, 1.05]) * ARM_WIDTH
         
-        # Angular spread: tighter near the core, slightly wider at the edges (optional, but realistic)
-        # Using a Gaussian falloff around the arm center
-        spread = np.random.normal(0, arm_widths[arm_indices], num_arm_stars)
+        # Angular spread: tighter near the core, slightly wider at the edges
+        spread = rng.normal(0.0, arm_widths[arm_indices], num_arm_stars)
         
         theta[is_arm] = ideal_theta + spread
         
@@ -86,55 +89,30 @@ class GalacticDisk:
         
         # Thickness: very thin compared to radius, slightly thicker in the middle
         thickness_scale = 0.2 + 0.3 * np.exp(-radius / 10.0)
-        y = np.random.normal(0, 1.0, self.num_stars) * thickness_scale
+        y = rng.normal(0.0, 1.0, self.num_stars) * thickness_scale
         
         positions = np.column_stack((x, y, z)).astype('f4')
         
-        # 5. Star Colors
-        colors = np.zeros((self.num_stars, 3), dtype='f4')
-        rand_c = np.random.random(self.num_stars)
-        
-        # Inter-arm / older population: yellow, orange, warm white
-        inter_arm_mask = ~is_arm
-        n_inter = np.sum(inter_arm_mask)
-        inter_c = np.zeros((n_inter, 3))
-        r_inter = rand_c[inter_arm_mask]
-        
-        inter_c[r_inter < 0.4] = [1.0, 0.7, 0.3] # Yellow-orange
-        inter_c[(r_inter >= 0.4) & (r_inter < 0.8)] = [1.0, 0.5, 0.1] # Orange
-        inter_c[r_inter >= 0.8] = [1.0, 0.95, 0.8] # Warm white
-        colors[inter_arm_mask] = inter_c
-        
-        # Arm population: more white, some blue/white stars (blue stars are a minority)
-        arm_mask = is_arm
-        n_arm = np.sum(arm_mask)
-        arm_c = np.zeros((n_arm, 3))
-        r_arm = rand_c[arm_mask]
-        
-        arm_c[r_arm < 0.4] = [1.0, 1.0, 1.0] # Pure white
-        arm_c[(r_arm >= 0.4) & (r_arm < 0.7)] = [0.9, 0.95, 1.0] # Blue-white
-        arm_c[(r_arm >= 0.7) & (r_arm < 0.9)] = [1.0, 0.95, 0.8] # Warm white
-        arm_c[r_arm >= 0.9] = [1.0, 0.8, 0.5] # Occasional yellow/orange
-        colors[arm_mask] = arm_c
-        
-        # Add slight color variance
-        colors += np.random.normal(0, 0.05, (self.num_stars, 3))
-        colors = np.clip(colors, 0.0, 1.0)
-        
-        # 6. Star Sizes: 90% tiny, 8% medium, 2% bright
-        sizes = np.zeros(self.num_stars, dtype='f4')
-        rand_s = np.random.random(self.num_stars)
-        tiny = rand_s < 0.9
-        med_s = (rand_s >= 0.9) & (rand_s < 0.98)
-        large = rand_s >= 0.98
-        
-        sizes[tiny] = np.random.uniform(0.01, 0.03, tiny.sum())
-        sizes[med_s] = np.random.uniform(0.04, 0.07, med_s.sum())
-        sizes[large] = np.random.uniform(0.1, 0.2, large.sum())
-        
-        # Brightness
-        brightness = np.random.uniform(0.3, 0.7, self.num_stars).astype('f4')
-        brightness[large] = np.random.uniform(0.8, 1.5, large.sum())
+        # ==========================================================
+        # 5. Continuous Arm-Proximity & Astrophysical Stellar Population
+        # ==========================================================
+        # Calculate arm-proximity factor A in [0, 1] for continuous population mixing:
+        # Near arm spine, young hot OB fraction is elevated.
+        # Inter-arm regions retain a rich, balanced mix of older & intermediate stars.
+        arm_factor = np.zeros(self.num_stars, dtype=np.float64)
+        if num_arm_stars > 0:
+            norm_spread = np.abs(spread) / arm_widths[arm_indices]
+            arm_factor[is_arm] = np.exp(-0.5 * (norm_spread ** 2)) * arm_strength[is_arm]
+            
+        from stellar_population import generate_stellar_population
+        colors, sizes, brightness = generate_stellar_population(
+            self.num_stars,
+            population_type='disk',
+            rng=rng,
+            arm_factor=arm_factor,
+            radius=radius,
+            diagnostic_mode=self.diagnostic_mode
+        )
         
         star_data = np.column_stack((positions, colors, sizes, brightness)).astype('f4')
         

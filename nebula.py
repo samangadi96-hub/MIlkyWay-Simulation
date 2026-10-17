@@ -1,11 +1,12 @@
 import numpy as np
 
 class NebulaManager:
-    def __init__(self, num_nebulae=100):
-        # Deterministic generation
-        np.random.seed(1337)
-        
+    def __init__(self, num_nebulae=100, seed=1337, diagnostic_mode=False):
         self.num_nebulae = num_nebulae
+        self.seed = seed
+        self.diagnostic_mode = diagnostic_mode
+        rng = np.random.default_rng(self.seed)
+        
         self.nebulae_data = [] # List of dicts for shader uniforms
         self.stars_data = []   # List of stars to add to galactic disk
         
@@ -32,18 +33,18 @@ class NebulaManager:
         for i in range(num_nebulae):
             # 1. Position along spiral arms
             # Preferentially place in the denser parts (r ~ 10-35)
-            r = np.random.gamma(shape=4.0, scale=4.0) + MIN_R
+            r = rng.gamma(shape=4.0, scale=4.0) + MIN_R
             r = np.clip(r, MIN_R, MAX_R)
             
             # Select arm
-            arm_index = np.random.randint(0, ARM_COUNT)
+            arm_index = rng.integers(0, ARM_COUNT)
             arm_base_angle = arm_index * (2 * np.pi / ARM_COUNT)
             
             # Ideal log spiral angle
             ideal_theta = arm_base_angle + SPIRAL_TIGHTNESS * np.log(r / INNER_RADIUS)
             
             # Slight offset inside/outside the arm
-            theta_offset = np.random.normal(0, 0.15)
+            theta_offset = rng.normal(0.0, 0.15)
             theta = ideal_theta + theta_offset
             
             # 3D Position
@@ -51,38 +52,38 @@ class NebulaManager:
             z = r * np.sin(theta)
             
             # Nebulae are very close to the galactic plane (thin disk)
-            y = np.random.normal(0, 0.1)
+            y = rng.normal(0.0, 0.1)
             
             # 2. Size and Type
-            size_roll = np.random.random()
+            size_roll = rng.random()
             if size_roll < 0.1: # 10% hero regions
-                radius = np.random.uniform(3.0, 5.0)
-                density = np.random.uniform(1.0, 1.5)
+                radius = rng.uniform(3.0, 5.0)
+                density = rng.uniform(1.0, 1.5)
             elif size_roll < 0.3: # 20% medium regions
-                radius = np.random.uniform(1.5, 3.0)
-                density = np.random.uniform(0.7, 1.1)
+                radius = rng.uniform(1.5, 3.0)
+                density = rng.uniform(0.7, 1.1)
             else: # 70% small faint regions
-                radius = np.random.uniform(0.6, 1.5)
-                density = np.random.uniform(0.4, 0.7)
+                radius = rng.uniform(0.6, 1.5)
+                density = rng.uniform(0.4, 0.7)
                 
             # Reflection fraction (minority are blue)
-            ref_roll = np.random.random()
+            ref_roll = rng.random()
             if ref_roll < 0.05: # 5% strong reflection
                 c = color_ref_bright
-                emission_strength = np.random.uniform(1.2, 2.0)
+                emission_strength = rng.uniform(1.2, 2.0)
             elif ref_roll < 0.2: # 15% weak reflection / mixed
                 c = color_ref_dusty * 0.4 + color_hii_magenta * 0.6
-                emission_strength = np.random.uniform(1.0, 1.5)
+                emission_strength = rng.uniform(1.0, 1.5)
             else: # 80% H-II
-                c_roll = np.random.random()
+                c_roll = rng.random()
                 if c_roll < 0.30: c = color_hii_crimson
                 elif c_roll < 0.70: c = color_hii_magenta
                 elif c_roll < 0.90: c = color_hii_salmon
                 else: c = color_hii_pale
-                emission_strength = np.random.uniform(1.5, 2.5)
+                emission_strength = rng.uniform(1.5, 2.5)
                 
             # Add some variance to color
-            c = c + np.random.normal(0, 0.05, 3)
+            c = c + rng.normal(0.0, 0.05, 3)
             c = np.clip(c, 0.0, 1.0)
             
             # Pack metadata into the shader
@@ -97,63 +98,44 @@ class NebulaManager:
             # Create dense star clusters (aggregates) that stand out from the surrounding disk
             if size_roll < 0.4: # Top 40% of nebulae get star clusters
                 if size_roll < 0.1: # Hero regions get massive clusters
-                    num_stars = np.random.randint(200, 500)
+                    cluster_count = rng.integers(150, 320)
                 elif size_roll < 0.25: # Medium regions get dense clusters
-                    num_stars = np.random.randint(70, 150)
+                    cluster_count = rng.integers(50, 110)
                 else: # Smaller regions get sparse clusters
-                    num_stars = np.random.randint(20, 50)
+                    cluster_count = rng.integers(15, 35)
                     
-                for _ in range(num_stars):
-                    # Place star concentrated around the nebula core
-                    dist_scale = np.random.gamma(shape=1.5, scale=0.3)
-                    theta_star = np.random.uniform(0, 2 * np.pi)
-                    phi_star = np.random.uniform(0, np.pi)
-                    
-                    # 3D offset (flattened slightly in the Y axis)
-                    dx = radius * dist_scale * np.sin(phi_star) * np.cos(theta_star)
-                    dy = (radius * dist_scale * np.cos(phi_star)) * 0.4
-                    dz = radius * dist_scale * np.sin(phi_star) * np.sin(theta_star)
-                    
-                    sx = x + dx
-                    sy = y + dy
-                    sz = z + dz
-                    
-                    # Cluster star colors:
-                    # Blend of extremely hot young blue stars, white giants, 
-                    # and intensely colored stars matching the nebula gas to simulate unresolved glowing knots.
-                    sc_roll = np.random.random()
-                    if sc_roll < 0.3:
-                        scolor = [0.7, 0.85, 1.0] # Bright young blue
-                    elif sc_roll < 0.5:
-                        scolor = [0.9, 0.95, 1.0] # Blue-white
-                    elif sc_roll < 0.65:
-                        scolor = [1.0, 1.0, 1.0] # Pure white
-                    else:
-                        # 35% of stars in the cluster take on the glowing gas color of the nebula itself
-                        scolor = c 
-                        
-                    # Add subtle variance
-                    scolor = np.clip(np.array(scolor) + np.random.normal(0, 0.05, 3), 0.0, 1.0)
-                        
-                    # Sizes and brightness
-                    # A few very bright massive stars, mostly smaller cluster members
-                    s_roll = np.random.random()
-                    if s_roll < 0.02:
-                        ssize = np.random.uniform(0.12, 0.25) # O-type giant
-                        sbright = np.random.uniform(2.0, 3.5)
-                    elif s_roll < 0.15:
-                        ssize = np.random.uniform(0.06, 0.12) # B-type
-                        sbright = np.random.uniform(1.2, 2.0)
-                    else:
-                        ssize = np.random.uniform(0.02, 0.05) # Standard cluster members
-                        sbright = np.random.uniform(0.5, 1.0)
-                    
-                    self.stars_data.append([sx, sy, sz, scolor[0], scolor[1], scolor[2], ssize, sbright])
+                dist_scale = rng.gamma(shape=1.5, scale=0.3, size=cluster_count)
+                theta_star = rng.uniform(0.0, 2.0 * np.pi, size=cluster_count)
+                phi_star = rng.uniform(0.0, np.pi, size=cluster_count)
+                
+                # 3D offset (flattened slightly in the Y axis)
+                dx = radius * dist_scale * np.sin(phi_star) * np.cos(theta_star)
+                dy = (radius * dist_scale * np.cos(phi_star)) * 0.4
+                dz = radius * dist_scale * np.sin(phi_star) * np.sin(theta_star)
+                
+                sx = x + dx
+                sy = y + dy
+                sz = z + dz
+                
+                from stellar_population import generate_stellar_population
+                c_stars, s_stars, b_stars = generate_stellar_population(
+                    cluster_count,
+                    population_type='nebula_cluster',
+                    rng=rng,
+                    diagnostic_mode=self.diagnostic_mode
+                )
+                
+                cluster_data = np.column_stack((sx, sy, sz, c_stars, s_stars, b_stars)).astype('f4')
+                self.stars_data.extend(cluster_data)
 
     def get_stars_array(self):
         if not self.stars_data:
             return np.zeros((0, 8), dtype='f4')
         return np.array(self.stars_data, dtype='f4')
+
+    def get_nebulae_regions(self):
+        """Reusable interface exposing positions and radii of all star-forming regions."""
+        return [{'center': n['position'][:3], 'radius': n['position'][3]} for n in self.nebulae_data]
 
     def get_shader_uniforms(self):
         """Returns two flat lists of floats for the shader arrays."""
