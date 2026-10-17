@@ -27,12 +27,9 @@ void main() {
     float proj_size = in_size * (340.0 / dist);
     
     // Conserve subpixel flux when zooming out:
-    // When a star's geometric projection shrinks below 1 pixel,
-    // gl_PointSize stays >= 1.0 to rasterize, and the perceived flux
-    // is smoothly scaled by pow(proj_size, 0.35) with a floor of 0.62.
-    // This preserves structural density contrast between the dense bar and diffuse disk
-    // while preventing distant stars from prematurely vanishing into dark grey.
-    float subpixel_factor = clamp(pow(proj_size / 1.0, 0.35), 0.62, 1.0);
+    // Preserves the distinct elongated morphology and luminous contrast of the
+    // central bar and bulge at far distances without premature dimming.
+    float subpixel_factor = clamp(pow(proj_size / 1.0, 0.20), 0.80, 1.0);
     
     gl_PointSize = clamp(proj_size, 1.0, 24.0);
     

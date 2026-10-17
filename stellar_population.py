@@ -231,7 +231,7 @@ def generate_stellar_population(
     if diagnostic_mode:
         colors = DIAGNOSTIC_COLORS[classes]
     else:
-        colors = temperature_to_rgb(temps, desat=0.18)
+        colors = temperature_to_rgb(temps, desat=0.04)
         # Subtle per-star chromatic variance prevents sterile uniformity
         color_noise = rng.normal(0.0, 0.015, (num_stars, 3)).astype(np.float32)
         colors = np.clip(colors + color_noise, 0.0, 1.0)

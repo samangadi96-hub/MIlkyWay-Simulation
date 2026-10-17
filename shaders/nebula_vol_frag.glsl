@@ -73,7 +73,7 @@ void main() {
     vec3 rd = normalize(target.xyz / target.w - u_camPos);
     vec3 ro = u_camPos;
 
-    float slab_H = 6.0;
+    float slab_H = 1.2; // Confined strictly to the thin star-forming galactic plane
     vec2 t_bounds = intersectSlab(ro, rd, slab_H);
 
     float transmittance = 1.0;
@@ -82,21 +82,29 @@ void main() {
 
     if (t_bounds.y > t_bounds.x && u_nebulaWeight > 0.001) {
         float t = t_bounds.x;
-        float t_end = min(t_bounds.y, 120.0); // Stop after 120 to save perf
+        float t_end = min(t_bounds.y, 160.0);
 
-        int steps = 40;
+        int steps = 36;
         float dt = (t_end - t) / float(steps);
 
         vec2 pixel = gl_FragCoord.xy;
         float jitter = interleavedGradientNoise(pixel);
         t += dt * jitter;
 
-        for (int i = 0; i < 40; i++) {
+        for (int i = 0; i < 36; i++) {
             if (t > t_end || transmittance < 0.01) break;
 
             vec3 p = ro + rd * t;
             vec4 p_local_4 = u_galaxyModel * vec4(p, 1.0);
             vec3 p_local = p_local_4.xyz;
+
+            // Performance optimization: nebulae are strictly confined to the thin galactic disk
+            // (|y| <= 1.0) and radial star-forming ring (5.5 <= r <= 41.5).
+            float r_xz = length(p_local.xz);
+            if (abs(p_local.y) > 1.0 || r_xz < 5.5 || r_xz > 41.5) {
+                t += dt;
+                continue;
+            }
 
             float local_density = 0.0;
             vec3 local_emission = vec3(0.0);
@@ -111,30 +119,29 @@ void main() {
                     float falloff = 1.0 - smoothstep(0.0, 1.0, d_norm);
                     
                     if (falloff > 0.01) {
-                        float ns = 1.5;
-                        vec3 p_noise = p_local * ns + vec3(float(j)*2.1);
+                        float ns = 4.2;
+                        vec3 p_noise = p_local * ns + vec3(float(j) * 3.17);
                         
-                        // FBM with domain warping
+                        // Multi-scale FBM with domain warping for filamentary clumps
                         float n_base = fbm3(p_noise);
-                        vec3 p_warp = p_noise + vec3(n_base * 2.0);
-                        float n_detail = fbm3(p_warp * 2.5);
+                        vec3 p_warp = p_noise + vec3(n_base * 1.6);
+                        float n_detail = fbm3(p_warp * 2.2);
                         
-                        // Boost shape to ensure it reaches higher values (fbm3 max is ~0.875)
-                        float shape = (n_base * 0.6 + n_detail * 0.4) * 1.5;
-                        
-                        // Lower threshold significantly so clouds fill more of the bounding sphere
-                        float cloud_density = smoothstep(0.1, 0.7, shape * falloff);
+                        float shape = (n_base * 0.55 + n_detail * 0.45);
+                        // Natural irregular boundary: threshold with falloff so edges are wispy filaments
+                        float cloud_density = max(0.0, (shape - 0.28) / 0.72) * pow(falloff, 1.4);
                         
                         if (cloud_density > 0.01) {
                             vec4 c_data = u_nebulae_col[j];
                             vec3 color = c_data.rgb;
                             float strength = c_data.a;
                             
-                            // High emission in the dense cores, but constrained to not instantly blow out
-                            float em = cloud_density * strength * 8.0;
+                            // Emission: deep crimson base with pink highlights in the densest clumps
+                            vec3 core_color = mix(color, vec3(1.0, 0.45, 0.65), clamp(cloud_density * 1.2, 0.0, 0.85));
+                            float em = cloud_density * strength * 2.2;
                             
-                            local_density += cloud_density * strength * 0.8;
-                            local_emission += color * em;
+                            local_density += cloud_density * strength * 0.75;
+                            local_emission += core_color * em;
                         }
                     }
                 }

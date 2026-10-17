@@ -60,55 +60,112 @@ class GalacticDisk:
             t = np.clip((x - e0) / (e1 - e0), 0.0, 1.0)
             return t * t * (3.0 - 2.0 * t)
 
-        # 1. Sample Radii for Disk Stars (smooth exponential/gamma distribution)
-        radius = rng.gamma(shape=2.0, scale=self.disk_scale, size=self.num_stars)
-        inv = (radius < self.inner_arm_radius) | (radius > self.outer_radius)
-        while np.any(inv):
-            radius[inv] = rng.gamma(shape=2.0, scale=self.disk_scale, size=np.sum(inv))
-            inv = (radius < self.inner_arm_radius) | (radius > self.outer_radius)
+        # ==========================================================
+        # 1. Dual-Component Stellar Disk (Structured Arms + Diffuse Disc)
+        # ==========================================================
+        # 68% Arm stars concentrated along the 4 spiral arms
+        # 32% Diffuse inter-arm background stars
+        n_arm = int(self.num_stars * 0.68)
+        n_diffuse = self.num_stars - n_arm
 
-        # 2. Guiding Center Azimuthal Distribution
-        # Uniform across [0, 2*pi) with smooth depletion along the bar minor axis inside r < 7.5
-        # (astrophysical inter-bar resonance cavity, keeping the 3D bar prominent)
-        theta = rng.uniform(0.0, 2.0 * math.pi, size=self.num_stars)
-        minor_axis_prox = np.abs(np.sin(theta - self.bar_angle_polar))
-        depletion = np.where(radius < 7.5, (1.0 - smoothstep_np(3.0, 7.5, radius)) * (0.88 * minor_axis_prox), 0.0)
-        rejected = rng.random(self.num_stars) < depletion
+        # --- A. Arm Population (Structured, Clumpy, Layered) ---
+        # Sample radii with exponential disc falloff
+        r_arm = rng.gamma(shape=2.2, scale=self.disk_scale, size=int(n_arm * 1.35))
+        r_arm = r_arm[(r_arm >= self.inner_arm_radius) & (r_arm <= self.outer_radius)]
+        # Outer disk soft fade: reject stars past 38 with probability smoothstep(38, 46)
+        fade_prob = 1.0 - smoothstep_np(38.0, 46.0, r_arm)
+        r_arm = r_arm[rng.random(len(r_arm)) < fade_prob][:n_arm]
+        while len(r_arm) < n_arm:
+            extra = rng.gamma(shape=2.2, scale=self.disk_scale, size=n_arm - len(r_arm))
+            extra = extra[(extra >= self.inner_arm_radius) & (extra <= self.outer_radius)]
+            fade = 1.0 - smoothstep_np(38.0, 46.0, extra)
+            r_arm = np.concatenate((r_arm, extra[rng.random(len(extra)) < fade]))
+        r_arm = r_arm[:n_arm]
 
+        # 4 Spiral arms with realistic astrophysical asymmetry:
+        # Arm 0 (Scutum-Centaurus, major): 31%
+        # Arm 1 (Sagittarius, minor): 20%
+        # Arm 2 (Perseus, major): 30%
+        # Arm 3 (Norma, minor): 19%
+        arm_indices = rng.choice(4, size=n_arm, p=[0.31, 0.20, 0.30, 0.19])
+        arm_base_angles = arm_indices * (2.0 * math.pi / 4.0)
+
+        # Logarithmic spiral spine
+        arm_spine_arm = self.arm_base_offset + self.spiral_tightness * np.log(r_arm / self.inner_arm_radius)
+        ideal_theta_arm = arm_base_angles + arm_spine_arm
+
+        # Along-arm density wave modulation (star-forming knots, clumps & gaps):
+        s_norm = (r_arm - self.inner_arm_radius) / (self.outer_radius - self.inner_arm_radius)
+        phi_arm = arm_indices * 1.5708
+        knot_offset = 0.15 * np.sin(2.0 * math.pi * 3.2 * s_norm + phi_arm) + 0.08 * np.sin(2.0 * math.pi * 6.5 * s_norm)
+
+        # Azimuthal Gaussian width: two-tier astrophysical arm structure
+        # Tier 1 (55%): dense star-forming spine, knots and bright clusters
+        # Tier 2 (45%): broad stellar envelope connecting smoothly into the disk
+        is_dense_spine = rng.random(n_arm) < 0.55
+        sigma_theta_dense = 0.11 + 0.08 * (r_arm / self.outer_radius)
+        sigma_theta_broad = 0.24 + 0.16 * (r_arm / self.outer_radius)
+        sigma_theta = np.where(is_dense_spine, sigma_theta_dense, sigma_theta_broad)
+
+        theta_arm = ideal_theta_arm + rng.normal(0.0, sigma_theta, size=n_arm) + np.where(is_dense_spine, knot_offset, knot_offset * 0.4)
+
+        # Arm thickness: young stars are in a very thin disk
+        thickness_arm = 0.12 + 0.14 * (r_arm / self.outer_radius)
+        y_arm = rng.normal(0.0, thickness_arm, size=n_arm)
+
+        # --- B. Diffuse Inter-Arm Population (Background Glow) ---
+        r_diff = rng.gamma(shape=2.0, scale=self.disk_scale, size=int(n_diffuse * 1.35))
+        r_diff = r_diff[(r_diff >= self.inner_arm_radius) & (r_diff <= self.outer_radius)]
+        fade_diff = 1.0 - smoothstep_np(38.0, 46.0, r_diff)
+        r_diff = r_diff[rng.random(len(r_diff)) < fade_diff][:n_diffuse]
+        while len(r_diff) < n_diffuse:
+            extra = rng.gamma(shape=2.0, scale=self.disk_scale, size=n_diffuse - len(r_diff))
+            extra = extra[(extra >= self.inner_arm_radius) & (extra <= self.outer_radius)]
+            fade = 1.0 - smoothstep_np(38.0, 46.0, extra)
+            r_diff = np.concatenate((r_diff, extra[rng.random(len(extra)) < fade]))
+        r_diff = r_diff[:n_diffuse]
+
+        theta_diff = rng.uniform(0.0, 2.0 * math.pi, size=n_diffuse)
+        
+        # Inter-bar resonance cavity depletion inside r < 7.5 to keep 3D bar prominent
+        minor_axis_prox = np.abs(np.sin(theta_diff - self.bar_angle_polar))
+        depletion = np.where(r_diff < 7.5, (1.0 - smoothstep_np(3.0, 7.5, r_diff)) * (0.85 * minor_axis_prox), 0.0)
+        rejected = rng.random(n_diffuse) < depletion
         attempts = 0
         while np.any(rejected) and attempts < 10:
             n_rej = np.sum(rejected)
-            new_r = rng.gamma(shape=2.0, scale=self.disk_scale, size=n_rej)
-            inv = (new_r < self.inner_arm_radius) | (new_r > self.outer_radius)
-            while np.any(inv):
-                new_r[inv] = rng.gamma(shape=2.0, scale=self.disk_scale, size=np.sum(inv))
-                inv = (new_r < self.inner_arm_radius) | (new_r > self.outer_radius)
             new_th = rng.uniform(0.0, 2.0 * math.pi, size=n_rej)
             new_prox = np.abs(np.sin(new_th - self.bar_angle_polar))
-            new_dep = np.where(new_r < 7.5, (1.0 - smoothstep_np(3.0, 7.5, new_r)) * (0.88 * new_prox), 0.0)
+            new_dep = np.where(r_diff[rejected] < 7.5, (1.0 - smoothstep_np(3.0, 7.5, r_diff[rejected])) * (0.85 * new_prox), 0.0)
             acc = rng.random(n_rej) >= new_dep
             if np.any(acc):
                 sub_indices = np.where(rejected)[0][acc]
-                radius[sub_indices] = new_r[acc]
-                theta[sub_indices] = new_th[acc]
-            curr_prox = np.abs(np.sin(theta - self.bar_angle_polar))
-            curr_dep = np.where(radius < 7.5, (1.0 - smoothstep_np(3.0, 7.5, radius)) * (0.88 * curr_prox), 0.0)
-            rejected = rng.random(self.num_stars) < curr_dep
+                theta_diff[sub_indices] = new_th[acc]
+            curr_prox = np.abs(np.sin(theta_diff - self.bar_angle_polar))
+            curr_dep = np.where(r_diff < 7.5, (1.0 - smoothstep_np(3.0, 7.5, r_diff)) * (0.85 * curr_prox), 0.0)
+            rejected = rng.random(n_diffuse) < curr_dep
             attempts += 1
 
-        # 3. 3D Spatial Distribution
+        # Diffuse disk thickness: thicker older population with radial flare
+        thickness_diff = 0.25 + 0.30 * (r_diff / self.outer_radius)
+        y_diff = rng.normal(0.0, thickness_diff, size=n_diffuse)
+
+        # Combine components
+        radius = np.concatenate((r_arm, r_diff)).astype('f4')
+        theta = np.concatenate((theta_arm, theta_diff)).astype('f4')
+        y = np.concatenate((y_arm, y_diff)).astype('f4')
+
         x = radius * np.cos(theta)
         z = radius * np.sin(theta)
-        thickness_scale = 0.2 + 0.3 * np.exp(-radius / 10.0)
-        y = rng.normal(0.0, 1.0, self.num_stars) * thickness_scale
-
         positions = np.column_stack((x, y, z)).astype('f4')
 
         # 4. Continuous Arm-Proximity & Astrophysical Stellar Population
-        arm_spine = self.arm_base_offset + self.spiral_tightness * np.log(radius / self.inner_arm_radius)
-        psi = 4.0 * (theta - arm_spine)
+        arm_spine_total = self.arm_base_offset + self.spiral_tightness * np.log(radius / self.inner_arm_radius)
+        psi = 4.0 * (theta - arm_spine_total)
         psi_wrap = (psi + math.pi) % (2.0 * math.pi) - math.pi
         arm_factor = 0.5 + 0.5 * np.cos(psi_wrap)
+        is_arm_star = np.arange(self.num_stars) < n_arm
+        arm_factor = np.where(is_arm_star, np.clip(arm_factor * 1.25, 0.0, 1.0), arm_factor * 0.45)
 
         from stellar_population import generate_stellar_population
         colors, sizes, brightness = generate_stellar_population(

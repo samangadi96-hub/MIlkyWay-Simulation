@@ -122,11 +122,14 @@ def test_full():
     neb_pos, neb_col = nebula_mgr.get_shader_uniforms()
     if "u_numNebulae" in nebula_prog:
         nebula_prog["u_numNebulae"].value = nebula_mgr.num_nebulae
-    for i in range(150):
-        if f"u_nebulae_pos[{i}]" in nebula_prog:
-            nebula_prog[f"u_nebulae_pos[{i}]"].value = tuple(neb_pos[i*4:i*4+4])
-        if f"u_nebulae_col[{i}]" in nebula_prog:
-            nebula_prog[f"u_nebulae_col[{i}]"].value = tuple(neb_col[i*4:i*4+4])
+    pos_data = np.zeros(150 * 4, dtype="f4")
+    col_data = np.zeros(150 * 4, dtype="f4")
+    pos_data[:len(neb_pos)] = neb_pos
+    col_data[:len(neb_col)] = neb_col
+    if "u_nebulae_pos" in nebula_prog:
+        nebula_prog["u_nebulae_pos"].write(pos_data.tobytes())
+    if "u_nebulae_col" in nebula_prog:
+        nebula_prog["u_nebulae_col"].write(col_data.tobytes())
             
     out_dir = base_dir / "test_renders"
     out_dir.mkdir(exist_ok=True)
@@ -220,8 +223,8 @@ def test_full():
         ctx.clear(0.0, 0.0, 0.0, 1.0)
         comp_tex.use(location=0)
         extract_prog["u_image"].value = 0
-        extract_prog["u_threshold"].value = 0.45
-        extract_prog["u_knee"].value = 0.30
+        extract_prog["u_threshold"].value = 0.28
+        extract_prog["u_knee"].value = 0.22
         extract_vao.render(mode=ctx.TRIANGLE_STRIP)
         
         # 6. Tight Bloom Blur
@@ -275,10 +278,10 @@ def test_full():
         post_prog["u_scene"].value = 0
         post_prog["u_bloomTight"].value = 1
         post_prog["u_bloomBroad"].value = 2
-        post_prog["u_exposure"].value = 1.10
-        post_prog["u_bloomTightIntensity"].value = 0.65
-        post_prog["u_bloomBroadIntensity"].value = 0.45
-        post_prog["u_dustProtection"].value = 0.85
+        post_prog["u_exposure"].value = 1.15
+        post_prog["u_bloomTightIntensity"].value = 0.60
+        post_prog["u_bloomBroadIntensity"].value = 0.40
+        post_prog["u_dustProtection"].value = 0.88
         post_prog["u_debugPost"].value = 0
         post_vao.render(mode=ctx.TRIANGLE_STRIP)
         

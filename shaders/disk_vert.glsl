@@ -76,7 +76,7 @@ void main() {
     float proj_size = in_size * (340.0 / dist);
     
     // Subpixel flux conservation: preserves visibility and contrast at far zoom
-    float subpixel_factor = clamp(pow(proj_size / 1.0, 0.35), 0.62, 1.0);
+    float subpixel_factor = clamp(pow(proj_size / 1.0, 0.28), 0.70, 1.0);
     gl_PointSize = clamp(proj_size, 1.0, 24.0);
     
     // Wave proximity factor for astrophysical luminosity enhancement

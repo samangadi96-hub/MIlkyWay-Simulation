@@ -256,11 +256,14 @@ class MilkyWaySimulation(mglw.WindowConfig):
         neb_pos, neb_col = self.nebula_mgr.get_shader_uniforms()
         if "u_numNebulae" in self.nebula_program:
             self.nebula_program["u_numNebulae"].value = self.nebula_mgr.num_nebulae
-        for i in range(150):
-            if f"u_nebulae_pos[{i}]" in self.nebula_program:
-                self.nebula_program[f"u_nebulae_pos[{i}]"].value = tuple(neb_pos[i*4:i*4+4])
-            if f"u_nebulae_col[{i}]" in self.nebula_program:
-                self.nebula_program[f"u_nebulae_col[{i}]"].value = tuple(neb_col[i*4:i*4+4])
+        pos_data = np.zeros(150 * 4, dtype="f4")
+        col_data = np.zeros(150 * 4, dtype="f4")
+        pos_data[:len(neb_pos)] = neb_pos
+        col_data[:len(neb_col)] = neb_col
+        if "u_nebulae_pos" in self.nebula_program:
+            self.nebula_program["u_nebulae_pos"].write(pos_data.tobytes())
+        if "u_nebulae_col" in self.nebula_program:
+            self.nebula_program["u_nebulae_col"].write(col_data.tobytes())
 
 
         self.renderer = Renderer(
@@ -904,8 +907,8 @@ class MilkyWaySimulation(mglw.WindowConfig):
         self.ctx.disable(self.ctx.BLEND)
         self.comp_tex.use(location=0)
         self.extract_program["u_image"].value = 0
-        self.extract_program["u_threshold"].value = 0.45
-        self.extract_program["u_knee"].value = 0.30
+        self.extract_program["u_threshold"].value = 0.28
+        self.extract_program["u_knee"].value = 0.22
         self.extract_vao.render(mode=self.ctx.TRIANGLE_STRIP)
 
         # 2.2: Tight Bloom Blur (half res)
@@ -968,10 +971,10 @@ class MilkyWaySimulation(mglw.WindowConfig):
         self.post_program["u_scene"].value = 0
         self.post_program["u_bloomTight"].value = 1
         self.post_program["u_bloomBroad"].value = 2
-        self.post_program["u_exposure"].value = 1.10
-        self.post_program["u_bloomTightIntensity"].value = 0.65
-        self.post_program["u_bloomBroadIntensity"].value = 0.45
-        self.post_program["u_dustProtection"].value = 0.85
+        self.post_program["u_exposure"].value = 1.15
+        self.post_program["u_bloomTightIntensity"].value = 0.60
+        self.post_program["u_bloomBroadIntensity"].value = 0.40
+        self.post_program["u_dustProtection"].value = 0.88
         if "u_debugPost" in self.post_program:
             self.post_program["u_debugPost"].value = self.debug_post_mode
 

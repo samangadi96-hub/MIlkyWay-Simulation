@@ -1,7 +1,7 @@
 import numpy as np
 
 class NebulaManager:
-    def __init__(self, num_nebulae=100, seed=1337, diagnostic_mode=False):
+    def __init__(self, num_nebulae=60, seed=1337, diagnostic_mode=False):
         self.num_nebulae = num_nebulae
         self.seed = seed
         self.diagnostic_mode = diagnostic_mode
@@ -10,10 +10,11 @@ class NebulaManager:
         self.nebulae_data = [] # List of dicts for shader uniforms
         self.stars_data = []   # List of stars to add to galactic disk
         
-        # Spiral Parameters (must match galactic_disk.py)
+        # Spiral Parameters (must match galactic_disk.py exactly)
         ARM_COUNT = 4
         SPIRAL_TIGHTNESS = 2.5
-        INNER_RADIUS = 2.0
+        INNER_RADIUS = 3.5
+        ARM_BASE_OFFSET = (np.pi / 2.0 - 0.488) - 2.5 * np.log(7.0 / 3.5)
         
         # We want nebulae mostly in the active star-forming ring
         MIN_R = 6.0
@@ -21,14 +22,14 @@ class NebulaManager:
         
         # Emission colors (Realistic Astrophotography H-II palette)
         # H-alpha (656 nm, deep red) + H-beta (486 nm, blue-cyan) + O-III (500 nm, teal)
-        color_hii_crimson = np.array([0.95, 0.05, 0.15]) # Pure deep H-alpha red
-        color_hii_magenta = np.array([1.00, 0.15, 0.35]) # Standard H-II magenta/pink
-        color_hii_salmon  = np.array([1.00, 0.30, 0.40]) # Warmer pink
-        color_hii_pale    = np.array([1.00, 0.45, 0.55]) # Pale pink (mixed with O-III)
+        color_hii_crimson = np.array([0.92, 0.06, 0.16]) # Pure deep H-alpha red
+        color_hii_magenta = np.array([0.96, 0.16, 0.36]) # Standard H-II magenta/pink
+        color_hii_salmon  = np.array([0.98, 0.28, 0.38]) # Warmer pink
+        color_hii_pale    = np.array([1.00, 0.42, 0.52]) # Pale pink (mixed with O-III)
         
         # Blue/white for reflection nebulae (dust scattering hot young star light)
-        color_ref_bright = np.array([0.4, 0.7, 1.0])
-        color_ref_dusty  = np.array([0.2, 0.4, 0.8])
+        color_ref_bright = np.array([0.35, 0.68, 1.0])
+        color_ref_dusty  = np.array([0.22, 0.42, 0.82])
         
         for i in range(num_nebulae):
             # 1. Position along spiral arms
@@ -36,12 +37,12 @@ class NebulaManager:
             r = rng.gamma(shape=4.0, scale=4.0) + MIN_R
             r = np.clip(r, MIN_R, MAX_R)
             
-            # Select arm
-            arm_index = rng.integers(0, ARM_COUNT)
+            # Select arm with realistic asymmetry
+            arm_index = rng.choice([0, 1, 2, 3], p=[0.32, 0.18, 0.32, 0.18])
             arm_base_angle = arm_index * (2 * np.pi / ARM_COUNT)
             
-            # Ideal log spiral angle
-            ideal_theta = arm_base_angle + SPIRAL_TIGHTNESS * np.log(r / INNER_RADIUS)
+            # Ideal log spiral angle (aligned directly with the stellar arms)
+            ideal_theta = arm_base_angle + ARM_BASE_OFFSET + SPIRAL_TIGHTNESS * np.log(r / INNER_RADIUS)
             
             # Slight offset inside/outside the arm
             theta_offset = rng.normal(0.0, 0.15)
@@ -52,19 +53,19 @@ class NebulaManager:
             z = r * np.sin(theta)
             
             # Nebulae are very close to the galactic plane (thin disk)
-            y = rng.normal(0.0, 0.1)
+            y = rng.normal(0.0, 0.08)
             
-            # 2. Size and Type
+            # 2. Size and Type (Astrophysical H-II complexes: 100 - 350 pc)
             size_roll = rng.random()
-            if size_roll < 0.1: # 10% hero regions
-                radius = rng.uniform(3.0, 5.0)
-                density = rng.uniform(1.0, 1.5)
-            elif size_roll < 0.3: # 20% medium regions
-                radius = rng.uniform(1.5, 3.0)
-                density = rng.uniform(0.7, 1.1)
-            else: # 70% small faint regions
-                radius = rng.uniform(0.6, 1.5)
-                density = rng.uniform(0.4, 0.7)
+            if size_roll < 0.10: # ~6 hero complexes (like 30 Doradus, NGC 604)
+                radius = rng.uniform(0.65, 0.95)
+                density = rng.uniform(1.0, 1.4)
+            elif size_roll < 0.35: # ~15 medium star-forming complexes
+                radius = rng.uniform(0.38, 0.65)
+                density = rng.uniform(0.8, 1.1)
+            else: # ~39 small localized H-II knots
+                radius = rng.uniform(0.20, 0.38)
+                density = rng.uniform(0.6, 0.9)
                 
             # Reflection fraction (minority are blue)
             ref_roll = rng.random()

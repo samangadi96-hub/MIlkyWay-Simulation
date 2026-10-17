@@ -99,12 +99,15 @@ vec2 intersectSlab(vec3 ro, vec3 rd, float H) {
 // Galaxy parameters — must match galactic_disk.py exactly
 // ============================================================
 
-const float PI = 3.14159265;
-const float TWO_PI = 6.28318530;
-const float INNER_RADIUS = 2.0;
+const float PI = 3.14159265358979323846;
+const float TWO_PI = 6.28318530717958647692;
+const float INNER_ARM_R = 3.5;
 const float OUTER_RADIUS = 45.0;
 const float ARM_COUNT = 4.0;
 const float SPIRAL_TIGHTNESS = 2.5;
+// Arm base offset matches galactic_disk.py exactly: (PI/2 - 0.488) - 2.5 * ln(7.0 / 3.5)
+const float ARM_BASE_OFFSET = -0.650072;
+const float BAR_ANGLE = 0.488;
 
 // ============================================================
 // Dust density function — the core of the upgrade
@@ -113,21 +116,17 @@ const float SPIRAL_TIGHTNESS = 2.5;
 float getDustDensity(vec3 p) {
     float r = length(p.xz);
 
-    // Hard cutoffs with smooth ramps
-    if (r < 2.5 || r > 47.0) return 0.0;
+    // Hard cutoffs with smooth ramps (preserves clean black-hole event horizon)
+    if (r < 0.65 || r > 47.0) return 0.0;
 
     // ----------------------------------------------------------
     // 1. RADIAL DISTRIBUTION
-    //    Weak near center, prominent across disk, smooth outer fade
+    //    Prominent across central bar and spiral arms, smooth outer fade
     // ----------------------------------------------------------
-    // Ramp up from inner edge: 0 at r=2.5 → 1 at r=6
-    float inner_ramp = smoothstep(2.5, 6.0, r);
-    // Exponential disk profile (matches star distribution shape)
-    float disk_profile = r * exp(-r / 10.0);  // peaks around r=10
-    // Normalize so peak ≈ 1
-    disk_profile = disk_profile / (10.0 * exp(-1.0));
-    // Smooth outer fade
-    float outer_fade = 1.0 - smoothstep(35.0, 46.0, r);
+    float inner_ramp = smoothstep(0.65, 2.2, r);
+    float disk_profile = r * exp(-r / 11.0);
+    disk_profile = disk_profile / (11.0 * exp(-1.0));
+    float outer_fade = 1.0 - smoothstep(36.0, 46.0, r);
 
     float radial = inner_ramp * disk_profile * outer_fade;
 
@@ -135,42 +134,52 @@ float getDustDensity(vec3 p) {
     // 2. VERTICAL PROFILE
     //    Thin Gaussian, height varies smoothly with radius
     // ----------------------------------------------------------
-    float scale_height = u_dustHeightScale * (0.25 + 0.2 * smoothstep(5.0, 30.0, r));
+    float scale_height = u_dustHeightScale * (0.22 + 0.18 * smoothstep(4.0, 28.0, r));
     float y_norm = p.y / scale_height;
     float vertical = exp(-0.5 * y_norm * y_norm);
 
     // ----------------------------------------------------------
-    // 3. SPIRAL ARM ALIGNMENT
-    //    Same log-spiral as galactic_disk.py, with narrow lane + diffuse envelope
+    // 3. SPIRAL ARM & BAR ALIGNMENT
+    //    Aligned with galactic_disk.py logarithmic arms + bar leading-edge lanes
     // ----------------------------------------------------------
+    float r_arm = max(r, INNER_ARM_R);
     float theta = atan(p.z, p.x);
 
-    // Find angular distance to closest arm
+    // Find angular distance to closest spiral arm
     float min_dist = 100.0;
     for (int i = 0; i < int(ARM_COUNT); i++) {
         float arm_base = float(i) * (TWO_PI / ARM_COUNT);
-        // Exact same spiral equation as galactic_disk.py line 72
-        float ideal_theta = arm_base + SPIRAL_TIGHTNESS * log(r / INNER_RADIUS);
+        float ideal_theta = arm_base + ARM_BASE_OFFSET + SPIRAL_TIGHTNESS * log(r_arm / INNER_ARM_R);
 
         float d_theta = mod(theta - ideal_theta + PI, TWO_PI) - PI;
-        // Apply the arm offset so dust is slightly inside the stellar arm
         float d_arm = abs(d_theta - u_dustArmOffset);
         min_dist = min(min_dist, d_arm);
     }
 
-    // Convert angular distance to approximate linear distance
-    // (more physically correct than pure angular)
     float linear_dist = min_dist * r;
 
     // Narrow dense lane (Gaussian core)
-    float lane_w = u_dustLaneWidth * r;  // scale with radius
+    float lane_w = u_dustLaneWidth * r;
     float dense_lane = exp(-linear_dist * linear_dist / (lane_w * lane_w + 0.001));
 
     // Broader diffuse envelope
     float diff_w = u_dustDiffuseWidth * r;
-    float diffuse_env = exp(-linear_dist * linear_dist / (diff_w * diff_w + 0.001)) * 0.2;
+    float diffuse_env = exp(-linear_dist * linear_dist / (diff_w * diff_w + 0.001)) * 0.25;
 
-    float arm_factor = dense_lane + diffuse_env;
+    float arm_factor = (dense_lane + diffuse_env) * smoothstep(2.5, 5.0, r);
+
+    // Bar leading-edge dust lanes (characteristic dark lanes cutting across the central bar)
+    if (r < 7.5) {
+        float sin_b = sin(BAR_ANGLE);
+        float cos_b = cos(BAR_ANGLE);
+        float u = p.x * sin_b + p.z * cos_b;
+        float v = -p.x * cos_b + p.z * sin_b;
+        
+        float target_v = sign(u) * 0.38;
+        float dv = abs(v - target_v);
+        float bar_lane = exp(-dv * dv / 0.035) * smoothstep(0.8, 1.8, abs(u)) * (1.0 - smoothstep(6.5, 7.5, abs(u)));
+        arm_factor = max(arm_factor, bar_lane * 1.6);
+    }
 
     // ----------------------------------------------------------
     // 4. MULTI-SCALE NOISE — domain-warped for filamentary structure
