@@ -50,9 +50,10 @@ def render_scene(ctx, fbo, color_tex, post_fbo, post_prog, quad_vao, width, heig
         ctx.depth_mask = True
         ctx.blend_func = (ctx.SRC_ALPHA, ctx.ONE)
 
-        disk.render(cam, aspect_ratio, star_vis, tc["rot"])
-        bar.render(cam, aspect_ratio, star_vis, tc["rot"])
-        bulge.render(cam, aspect_ratio, star_vis, tc["rot"])
+        sim_t = tc.get("sim_time", 0.0)
+        disk.render(cam, aspect_ratio, star_vis, tc["rot"], sim_time=sim_t)
+        bar.render(cam, aspect_ratio, star_vis, tc["rot"], sim_time=sim_t)
+        bulge.render(cam, aspect_ratio, star_vis, tc["rot"], sim_time=sim_t)
 
         # Post-processing pass: bloom + ACES tonemapping
         post_fbo.use()
@@ -153,6 +154,29 @@ def run_tests():
         {"name": "scientific_map_full_galaxy", "incl": math.radians(2.0), "azim": 0.0, "dist": 110.0, "rot": 0.0},
     ]
     render_scene(ctx, fbo, color_tex, post_fbo, post_prog, quad_vao, width, height, disk, bar, bulge, map_test_cases, out_dir, prefix="", g_map=g_map)
+
+    print("\n--- 4. Testing Differential Galactic Rotation Over Time ---")
+    # Verify rotation curve analytically
+    r_test = [1.0, 3.5, 7.5, 15.6, 25.0, 35.0, 45.0]
+    print(f"Rotation curve params: v_flat={disk.v_flat:.2f}, r_core={disk.r_core:.2f}, Omega_p={disk.pattern_speed:.4f} rad/s")
+    print(f"{'Radius':<8} | {'v(r)':<8} | {'omega(r)':<10} | {'T_orb (s)':<10} | {'omega - Omega_p':<16}")
+    print("-" * 65)
+    for r in r_test:
+        vr = disk.v_flat * r / math.sqrt(r * r + disk.r_core * disk.r_core)
+        w = disk.v_flat / math.sqrt(r * r + disk.r_core * disk.r_core)
+        t_orb = 2 * math.pi / w
+        diff = w - disk.pattern_speed
+        print(f"{r:<8.1f} | {vr:<8.4f} | {w:<10.4f} | {t_orb:<10.1f} | {diff:<+16.4f}")
+
+    # Differential rotation render tests
+    diff_test_cases = [
+        {"name": "diff_rotation_t0", "incl": math.radians(20.0), "azim": 0.0, "dist": 40.0, "rot": 0.0, "sim_time": 0.0},
+        {"name": "diff_rotation_t15", "incl": math.radians(20.0), "azim": 0.0, "dist": 40.0, "rot": disk.pattern_speed * 15.0, "sim_time": 15.0},
+        {"name": "diff_rotation_t30", "incl": math.radians(20.0), "azim": 0.0, "dist": 40.0, "rot": disk.pattern_speed * 30.0, "sim_time": 30.0},
+        {"name": "diff_rotation_t60", "incl": math.radians(20.0), "azim": 0.0, "dist": 40.0, "rot": disk.pattern_speed * 60.0, "sim_time": 60.0},
+        {"name": "diff_oblique_t30", "incl": math.radians(60.0), "azim": 0.0, "dist": 35.0, "rot": disk.pattern_speed * 30.0, "sim_time": 30.0},
+    ]
+    render_scene(ctx, fbo, color_tex, post_fbo, post_prog, quad_vao, width, height, disk, bar, bulge, diff_test_cases, out_dir, prefix="")
 
     print("\nAll tests completed successfully!")
 

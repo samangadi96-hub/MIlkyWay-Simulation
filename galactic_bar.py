@@ -168,7 +168,7 @@ class GalacticBar:
             [(self.vbo, '3f 3f 1f 1f', 'in_position', 'in_color', 'in_size', 'in_brightness')]
         )
 
-    def render(self, camera, aspect_ratio, visibility, rotation_angle):
+    def render(self, camera, aspect_ratio, visibility, rotation_angle, sim_time=0.0):
         if visibility <= 0.001:
             return
 

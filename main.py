@@ -39,9 +39,16 @@ class MilkyWaySimulation(mglw.WindowConfig):
         self.galactic_disk = GalacticDisk(self.ctx, Path(__file__).parent, nebula_stars=self.nebula_mgr.get_stars_array())
         self.galactic_map  = GalacticMap(self.ctx, Path(__file__).parent)
         
+        # ==========================================================
+        # Differential Galactic Rotation & Simulation Clock
+        # ==========================================================
+        self.sim_time = 0.0
+        self.sim_speed = 1.0
+        self.sim_paused = False
+        self.v_flat = self.galactic_disk.v_flat
+        self.r_core = self.galactic_disk.r_core
+        self.pattern_speed = self.galactic_disk.pattern_speed
         self.galaxy_rotation_angle = 0.0
-
-
 
         # Keyboard state flags
         self.move_up    = False
@@ -49,7 +56,6 @@ class MilkyWaySimulation(mglw.WindowConfig):
         self.move_left  = False
         self.move_right = False
         self._zoom_in   = False
-        self._zoom_out  = False
         self._zoom_out  = False
         self.debug_dust = False
         self.debug_nebula = False
@@ -64,6 +70,9 @@ class MilkyWaySimulation(mglw.WindowConfig):
         print('  A/D / Left/Right -> rotate camera')
         print('  Q / E            -> zoom in / out')
         print('  R                -> reset camera')
+        print('  SPACE            -> pause / resume orbital simulation')
+        print('  [ / ]            -> decrease / increase simulation speed')
+        print('  Backspace / 0    -> reset simulation clock')
         print('  T                -> toggle dust debug')
         print('  N                -> toggle nebula debug')
         print('  M                -> toggle scientific galactic map overlay')
@@ -360,6 +369,24 @@ class MilkyWaySimulation(mglw.WindowConfig):
                 status = "ON" if self.galactic_map.enabled else "OFF"
                 print(f"\n[Map] Scientific Galactic Map Overlay: {status}")
 
+            elif key == self.wnd.keys.SPACE:
+                self.sim_paused = not self.sim_paused
+                status = "PAUSED" if self.sim_paused else "RUNNING"
+                print(f"\n[Sim] Differential Galactic Rotation: {status} (Speed: {self.sim_speed:.2f}x)")
+
+            elif key == self.wnd.keys.LEFT_BRACKET:
+                self.sim_speed = max(0.125, self.sim_speed / 2.0)
+                print(f"\n[Sim] Simulation Speed Multiplier: {self.sim_speed:.2f}x")
+
+            elif key == self.wnd.keys.RIGHT_BRACKET:
+                self.sim_speed = min(16.0, self.sim_speed * 2.0)
+                print(f"\n[Sim] Simulation Speed Multiplier: {self.sim_speed:.2f}x")
+
+            elif key in (self.wnd.keys.BACKSPACE, self.wnd.keys.NUMBER_0):
+                self.sim_time = 0.0
+                self.galaxy_rotation_angle = 0.0
+                print(f"\n[Sim] Simulation Clock Reset to t=0.0s")
+
         elif action == self.wnd.keys.ACTION_RELEASE:
 
             if key in (self.wnd.keys.W, self.wnd.keys.UP):
@@ -433,13 +460,22 @@ class MilkyWaySimulation(mglw.WindowConfig):
 
 
         fps = 1.0 / max(frametime, 0.0001)
-        
-        self.galaxy_rotation_angle += frametime * 0.05
-        
+
+        # Single elapsed simulation clock with pause/resume and speed control
+        if not self.sim_paused:
+            self.sim_time += frametime * self.sim_speed
+
+        # Safe wrapping of pattern rotation angle to [0, 2*pi)
+        self.galaxy_rotation_angle = math.fmod(self.pattern_speed * self.sim_time, 2.0 * math.pi)
+        if self.galaxy_rotation_angle < 0.0:
+            self.galaxy_rotation_angle += 2.0 * math.pi
+
+        sim_status = "PAUSED" if self.sim_paused else f"{self.sim_speed:.2f}x"
         print(
             f"Stars: {self.bulge.num_stars + self.bar.num_stars + self.galactic_disk.num_stars} "
+            f"Sim: {self.sim_time:.1f}s [{sim_status}] "
             f"Bulge vis: {lod_state['bulge_visibility']:.2f} "
-            f"Galaxy Rot: {self.galaxy_rotation_angle:.2f} "
+            f"Pattern Rot: {math.degrees(self.galaxy_rotation_angle):.1f}° "
             f"Dist: {self.camera.absolute_distance:.1f} "
             f"FPS: {fps:.1f}      ",
             end="\r",
@@ -627,19 +663,22 @@ class MilkyWaySimulation(mglw.WindowConfig):
             self.camera, 
             bh.aspect_ratio, 
             star_visibility, 
-            self.galaxy_rotation_angle
+            self.galaxy_rotation_angle,
+            sim_time=self.sim_time
         )
         self.bar.render(
             self.camera, 
             bh.aspect_ratio, 
             star_visibility, 
-            self.galaxy_rotation_angle
+            self.galaxy_rotation_angle,
+            sim_time=self.sim_time
         )
         self.bulge.render(
             self.camera, 
             bh.aspect_ratio, 
             star_visibility, 
-            self.galaxy_rotation_angle
+            self.galaxy_rotation_angle,
+            sim_time=self.sim_time
         )
 
         # ----------------------------------------------------------
