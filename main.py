@@ -59,6 +59,7 @@ class MilkyWaySimulation(mglw.WindowConfig):
         self._zoom_out  = False
         self.debug_dust = False
         self.debug_nebula = False
+        self.debug_post_mode = 0
 
         print()
         print('  Milky Way Simulation - Controls')
@@ -75,6 +76,7 @@ class MilkyWaySimulation(mglw.WindowConfig):
         print('  Backspace / 0    -> reset simulation clock')
         print('  T                -> toggle dust debug')
         print('  N                -> toggle nebula debug')
+        print('  B                -> cycle post-processing debug views')
         print('  M                -> toggle scientific galactic map overlay')
         print('  --------------------------------')
         print()
@@ -186,6 +188,30 @@ class MilkyWaySimulation(mglw.WindowConfig):
             ],
         )
 
+        with open(BASE_DIR / "shaders" / "bloom_extract_frag.glsl", encoding="utf-8") as f:
+            extract_frag = f.read()
+
+        with open(BASE_DIR / "shaders" / "bloom_blur_frag.glsl", encoding="utf-8") as f:
+            blur_frag = f.read()
+
+        self.extract_program = self.ctx.program(
+            vertex_shader=post_vert,
+            fragment_shader=extract_frag,
+        )
+        self.blur_program = self.ctx.program(
+            vertex_shader=post_vert,
+            fragment_shader=blur_frag,
+        )
+
+        self.extract_vao = self.ctx.vertex_array(
+            self.extract_program,
+            [(self.quad_buffer, "2f 2f", "in_vert", "in_texcoord")]
+        )
+        self.blur_vao = self.ctx.vertex_array(
+            self.blur_program,
+            [(self.quad_buffer, "2f 2f", "in_vert", "in_texcoord")]
+        )
+
         # ==========================================================
         # Dust Volume Shader (quarter-res)
         # ==========================================================
@@ -264,7 +290,9 @@ class MilkyWaySimulation(mglw.WindowConfig):
 
     def create_framebuffer(self, width, height):
 
-        self.scene_tex = self.ctx.texture((width, height), 4)
+        # Full-resolution HDR scene framebuffer (RGBA16F for high dynamic range star radiance)
+        self.scene_tex = self.ctx.texture((width, height), 4, dtype='f2')
+        self.scene_tex.filter = (self.ctx.LINEAR, self.ctx.LINEAR)
         # Use depth TEXTURE (not renderbuffer) so it can be sampled in shaders
         self.depth_tex = self.ctx.depth_texture((width, height))
         # Disable comparison mode so we read raw depth values, not shadow-map 0/1
@@ -289,9 +317,30 @@ class MilkyWaySimulation(mglw.WindowConfig):
         self.nebula_depth_tex.filter = (self.ctx.LINEAR, self.ctx.LINEAR)
         self.nebula_fbo = self.ctx.framebuffer(color_attachments=[self.nebula_col_tex, self.nebula_depth_tex])
 
-        # Intermediate composited scene FBO (full res)
-        self.comp_tex = self.ctx.texture((width, height), 4)
+        # Intermediate composited scene FBO (full res RGBA16F)
+        self.comp_tex = self.ctx.texture((width, height), 4, dtype='f2')
+        self.comp_tex.filter = (self.ctx.LINEAR, self.ctx.LINEAR)
         self.comp_fbo = self.ctx.framebuffer(color_attachments=[self.comp_tex])
+
+        # Multi-scale Bloom Framebuffers (RGBA16F)
+        # Half-resolution for tight optical glow around bright stars and cores
+        hw, hh = max(width // 2, 1), max(height // 2, 1)
+        self.bloom_half_tex = self.ctx.texture((hw, hh), 4, dtype='f2')
+        self.bloom_half_tex.filter = (self.ctx.LINEAR, self.ctx.LINEAR)
+        self.bloom_half_temp = self.ctx.texture((hw, hh), 4, dtype='f2')
+        self.bloom_half_temp.filter = (self.ctx.LINEAR, self.ctx.LINEAR)
+        self.bloom_extract_fbo = self.ctx.framebuffer(color_attachments=[self.bloom_half_tex])
+        self.bloom_half_temp_fbo = self.ctx.framebuffer(color_attachments=[self.bloom_half_temp])
+        self.bloom_half_blur_fbo = self.ctx.framebuffer(color_attachments=[self.bloom_half_tex])
+
+        # Quarter-resolution for broad diffuse galactic halo
+        self.bloom_quarter_tex = self.ctx.texture((qw, qh), 4, dtype='f2')
+        self.bloom_quarter_tex.filter = (self.ctx.LINEAR, self.ctx.LINEAR)
+        self.bloom_quarter_temp = self.ctx.texture((qw, qh), 4, dtype='f2')
+        self.bloom_quarter_temp.filter = (self.ctx.LINEAR, self.ctx.LINEAR)
+        self.bloom_down_fbo = self.ctx.framebuffer(color_attachments=[self.bloom_quarter_tex])
+        self.bloom_quarter_temp_fbo = self.ctx.framebuffer(color_attachments=[self.bloom_quarter_temp])
+        self.bloom_quarter_blur_fbo = self.ctx.framebuffer(color_attachments=[self.bloom_quarter_tex])
 
     # ==============================================================
     # Window Resize
@@ -300,6 +349,7 @@ class MilkyWaySimulation(mglw.WindowConfig):
     def on_resize(self, width: int, height: int):
 
         self.scene_tex.release()
+        self.depth_tex.release()
         self.fbo.release()
         self.dust_tex.release()
         self.dust_fbo.release()
@@ -308,6 +358,18 @@ class MilkyWaySimulation(mglw.WindowConfig):
         self.nebula_fbo.release()
         self.comp_tex.release()
         self.comp_fbo.release()
+
+        self.bloom_half_tex.release()
+        self.bloom_half_temp.release()
+        self.bloom_extract_fbo.release()
+        self.bloom_half_temp_fbo.release()
+        self.bloom_half_blur_fbo.release()
+
+        self.bloom_quarter_tex.release()
+        self.bloom_quarter_temp.release()
+        self.bloom_down_fbo.release()
+        self.bloom_quarter_temp_fbo.release()
+        self.bloom_quarter_blur_fbo.release()
 
         self.create_framebuffer(width, height)
 
@@ -363,6 +425,17 @@ class MilkyWaySimulation(mglw.WindowConfig):
 
             elif key == self.wnd.keys.N:
                 self.debug_nebula = not self.debug_nebula
+
+            elif key == self.wnd.keys.B:
+                self.debug_post_mode = (self.debug_post_mode + 1) % 5
+                mode_names = [
+                    "Normal (Cinematic Astrophotography)",
+                    "Tight Bloom Buffer",
+                    "Broad Bloom Buffer",
+                    "Attenuated Combined Bloom",
+                    "Raw Scene (No Bloom)"
+                ]
+                print(f"\n[Post-Processing] Mode: {mode_names[self.debug_post_mode]}")
 
             elif key == self.wnd.keys.M:
                 self.galactic_map.enabled = not self.galactic_map.enabled
@@ -818,17 +891,89 @@ class MilkyWaySimulation(mglw.WindowConfig):
 
         # ----------------------------------------------------------
         # PASS 2
-        # Post Processing
+        # Astrophotography Post Processing & Multi-Scale Bloom
         # ----------------------------------------------------------
+        w, h = self.wnd.size
+        hw, hh = max(w // 2, 1), max(h // 2, 1)
+        qw, qh = max(w // 4, 1), max(h // 4, 1)
 
-        self.ctx.screen.use()
-
-        self.ctx.clear(0.02, 0.02, 0.03, 1.0)
+        # 2.1: Extract bright highlights into bloom_half_tex
+        self.bloom_extract_fbo.use()
+        self.ctx.clear(0.0, 0.0, 0.0, 1.0)
         self.ctx.disable(self.ctx.DEPTH_TEST)
+        self.ctx.disable(self.ctx.BLEND)
+        self.comp_tex.use(location=0)
+        self.extract_program["u_image"].value = 0
+        self.extract_program["u_threshold"].value = 0.45
+        self.extract_program["u_knee"].value = 0.30
+        self.extract_vao.render(mode=self.ctx.TRIANGLE_STRIP)
+
+        # 2.2: Tight Bloom Blur (half res)
+        # Horizontal
+        self.bloom_half_temp_fbo.use()
+        self.ctx.clear(0.0, 0.0, 0.0, 1.0)
+        self.bloom_half_tex.use(location=0)
+        self.blur_program["u_image"].value = 0
+        self.blur_program["u_direction"].value = (1.0 / hw, 0.0)
+        self.blur_program["u_radius"].value = 2.0
+        self.blur_vao.render(mode=self.ctx.TRIANGLE_STRIP)
+
+        # Vertical
+        self.bloom_half_blur_fbo.use()
+        self.ctx.clear(0.0, 0.0, 0.0, 1.0)
+        self.bloom_half_temp.use(location=0)
+        self.blur_program["u_image"].value = 0
+        self.blur_program["u_direction"].value = (0.0, 1.0 / hh)
+        self.blur_program["u_radius"].value = 2.0
+        self.blur_vao.render(mode=self.ctx.TRIANGLE_STRIP)
+
+        # 2.3: Broad Bloom Blur (quarter res)
+        # Downsample tight bloom into quarter res
+        self.bloom_down_fbo.use()
+        self.ctx.clear(0.0, 0.0, 0.0, 1.0)
+        self.bloom_half_tex.use(location=0)
+        self.extract_program["u_image"].value = 0
+        self.extract_program["u_threshold"].value = 0.0
+        self.extract_program["u_knee"].value = 0.01
+        self.extract_vao.render(mode=self.ctx.TRIANGLE_STRIP)
+
+        # Horizontal
+        self.bloom_quarter_temp_fbo.use()
+        self.ctx.clear(0.0, 0.0, 0.0, 1.0)
+        self.bloom_quarter_tex.use(location=0)
+        self.blur_program["u_image"].value = 0
+        self.blur_program["u_direction"].value = (1.0 / qw, 0.0)
+        self.blur_program["u_radius"].value = 3.5
+        self.blur_vao.render(mode=self.ctx.TRIANGLE_STRIP)
+
+        # Vertical
+        self.bloom_quarter_blur_fbo.use()
+        self.ctx.clear(0.0, 0.0, 0.0, 1.0)
+        self.bloom_quarter_temp.use(location=0)
+        self.blur_program["u_image"].value = 0
+        self.blur_program["u_direction"].value = (0.0, 1.0 / qh)
+        self.blur_program["u_radius"].value = 3.5
+        self.blur_vao.render(mode=self.ctx.TRIANGLE_STRIP)
+
+        # 2.4: Final Screen Pass: HDR Composite + Multi-scale Bloom + Filmic ACES Tone Mapping
+        self.ctx.screen.use()
+        self.ctx.clear(0.0, 0.0, 0.0, 1.0)
+        self.ctx.disable(self.ctx.DEPTH_TEST)
+        self.ctx.disable(self.ctx.BLEND)
 
         self.comp_tex.use(location=0)
+        self.bloom_half_tex.use(location=1)
+        self.bloom_quarter_tex.use(location=2)
 
-        self.post_program["scene"].value = 0
+        self.post_program["u_scene"].value = 0
+        self.post_program["u_bloomTight"].value = 1
+        self.post_program["u_bloomBroad"].value = 2
+        self.post_program["u_exposure"].value = 1.10
+        self.post_program["u_bloomTightIntensity"].value = 0.65
+        self.post_program["u_bloomBroadIntensity"].value = 0.45
+        self.post_program["u_dustProtection"].value = 0.85
+        if "u_debugPost" in self.post_program:
+            self.post_program["u_debugPost"].value = self.debug_post_mode
 
         self.quad_vao.render(mode=self.ctx.TRIANGLE_STRIP)
 

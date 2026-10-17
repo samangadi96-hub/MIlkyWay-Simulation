@@ -12,9 +12,15 @@ from galactic_disk import GalacticDisk
 from nebula import NebulaManager
 
 
-def render_scene(ctx, fbo, color_tex, post_fbo, post_prog, quad_vao, width, height, disk, bar, bulge, test_cases, out_dir, prefix="", g_map=None):
+def render_scene(ctx, fbo, scene_tex, post_fbo, post_prog, extract_prog, blur_prog, quad_vao, width, height, disk, bar, bulge, test_cases, out_dir, prefix="", g_map=None, bloom_fbos=None):
     aspect_ratio = width / height
     lod_mgr = LODManager()
+
+    hw, hh = width // 2, height // 2
+    qw, qh = width // 4, height // 4
+    
+    b_extract_fbo, b_half_temp_fbo, b_half_blur_fbo, b_down_fbo, b_quarter_temp_fbo, b_quarter_blur_fbo = bloom_fbos["fbos"]
+    b_half_tex, b_half_temp, b_quarter_tex, b_quarter_temp = bloom_fbos["textures"]
 
     for tc in test_cases:
         cam = Camera()
@@ -44,8 +50,9 @@ def render_scene(ctx, fbo, color_tex, post_fbo, post_prog, quad_vao, width, heig
                 t = smoothstep_py(8.0, 11.0, d)
                 star_vis = 0.55 * (1.0 - t) + base_at_11 * t
 
+        # 1. Render scene into HDR FBO
         fbo.use()
-        ctx.clear(0.005, 0.005, 0.008, 1.0, depth=1.0)
+        ctx.clear(0.0, 0.0, 0.0, 1.0, depth=1.0)
         ctx.enable(ctx.DEPTH_TEST)
         ctx.depth_mask = True
         ctx.blend_func = (ctx.SRC_ALPHA, ctx.ONE)
@@ -55,12 +62,82 @@ def render_scene(ctx, fbo, color_tex, post_fbo, post_prog, quad_vao, width, heig
         bar.render(cam, aspect_ratio, star_vis, tc["rot"], sim_time=sim_t)
         bulge.render(cam, aspect_ratio, star_vis, tc["rot"], sim_time=sim_t)
 
-        # Post-processing pass: bloom + ACES tonemapping
-        post_fbo.use()
-        ctx.clear(0.02, 0.02, 0.03, 1.0)
+        # 2. Extract bright highlights (half res)
+        b_extract_fbo.use()
+        ctx.clear(0.0, 0.0, 0.0, 1.0)
         ctx.disable(ctx.DEPTH_TEST)
-        color_tex.use(location=0)
-        post_prog["scene"].value = 0
+        ctx.disable(ctx.BLEND)
+        scene_tex.use(location=0)
+        extract_prog["u_image"].value = 0
+        extract_prog["u_threshold"].value = 0.45
+        extract_prog["u_knee"].value = 0.30
+        quad_vao.render(mode=ctx.TRIANGLE_STRIP)
+
+        # 3. Tight Bloom Blur (half res)
+        # Horizontal
+        b_half_temp_fbo.use()
+        ctx.clear(0.0, 0.0, 0.0, 1.0)
+        b_half_tex.use(location=0)
+        blur_prog["u_image"].value = 0
+        blur_prog["u_direction"].value = (1.0 / hw, 0.0)
+        blur_prog["u_radius"].value = 2.0
+        quad_vao.render(mode=ctx.TRIANGLE_STRIP)
+
+        # Vertical
+        b_half_blur_fbo.use()
+        ctx.clear(0.0, 0.0, 0.0, 1.0)
+        b_half_temp.use(location=0)
+        blur_prog["u_image"].value = 0
+        blur_prog["u_direction"].value = (0.0, 1.0 / hh)
+        blur_prog["u_radius"].value = 2.0
+        quad_vao.render(mode=ctx.TRIANGLE_STRIP)
+
+        # 4. Broad Bloom Blur (quarter res)
+        b_down_fbo.use()
+        ctx.clear(0.0, 0.0, 0.0, 1.0)
+        b_half_tex.use(location=0)
+        extract_prog["u_image"].value = 0
+        extract_prog["u_threshold"].value = 0.0
+        extract_prog["u_knee"].value = 0.01
+        quad_vao.render(mode=ctx.TRIANGLE_STRIP)
+
+        # Horizontal
+        b_quarter_temp_fbo.use()
+        ctx.clear(0.0, 0.0, 0.0, 1.0)
+        b_quarter_tex.use(location=0)
+        blur_prog["u_image"].value = 0
+        blur_prog["u_direction"].value = (1.0 / qw, 0.0)
+        blur_prog["u_radius"].value = 3.5
+        quad_vao.render(mode=ctx.TRIANGLE_STRIP)
+
+        # Vertical
+        b_quarter_blur_fbo.use()
+        ctx.clear(0.0, 0.0, 0.0, 1.0)
+        b_quarter_temp.use(location=0)
+        blur_prog["u_image"].value = 0
+        blur_prog["u_direction"].value = (0.0, 1.0 / qh)
+        blur_prog["u_radius"].value = 3.5
+        quad_vao.render(mode=ctx.TRIANGLE_STRIP)
+
+        # 5. Post-processing pass: bloom + ACES filmic tonemapping
+        post_fbo.use()
+        ctx.clear(0.0, 0.0, 0.0, 1.0)
+        ctx.disable(ctx.DEPTH_TEST)
+        ctx.disable(ctx.BLEND)
+        scene_tex.use(location=0)
+        b_half_tex.use(location=1)
+        b_quarter_tex.use(location=2)
+
+        post_prog["u_scene"].value = 0
+        post_prog["u_bloomTight"].value = 1
+        post_prog["u_bloomBroad"].value = 2
+        post_prog["u_exposure"].value = 1.10
+        post_prog["u_bloomTightIntensity"].value = 0.65
+        post_prog["u_bloomBroadIntensity"].value = 0.45
+        post_prog["u_dustProtection"].value = 0.85
+        if "u_debugPost" in post_prog:
+            post_prog["u_debugPost"].value = 0
+
         quad_vao.render(mode=ctx.TRIANGLE_STRIP)
 
         # Scientific map overlay pass
@@ -82,19 +159,53 @@ def run_tests():
     base_dir = Path(__file__).parent
 
     width, height = 1280, 720
-    color_tex = ctx.texture((width, height), 4)
+    hw, hh = width // 2, height // 2
+    qw, qh = width // 4, height // 4
+
+    scene_tex = ctx.texture((width, height), 4, dtype='f2')
+    scene_tex.filter = (ctx.LINEAR, ctx.LINEAR)
     depth_tex = ctx.depth_texture((width, height))
-    fbo = ctx.framebuffer(color_attachments=[color_tex], depth_attachment=depth_tex)
+    depth_tex.compare_func = ''
+    fbo = ctx.framebuffer(color_attachments=[scene_tex], depth_attachment=depth_tex)
 
     # Post FBO
     post_tex = ctx.texture((width, height), 4)
     post_fbo = ctx.framebuffer(color_attachments=[post_tex])
 
+    # Multi-scale Bloom textures and FBOs (RGBA16F)
+    bloom_half_tex = ctx.texture((hw, hh), 4, dtype='f2')
+    bloom_half_tex.filter = (ctx.LINEAR, ctx.LINEAR)
+    bloom_half_temp = ctx.texture((hw, hh), 4, dtype='f2')
+    bloom_half_temp.filter = (ctx.LINEAR, ctx.LINEAR)
+    bloom_extract_fbo = ctx.framebuffer(color_attachments=[bloom_half_tex])
+    bloom_half_temp_fbo = ctx.framebuffer(color_attachments=[bloom_half_temp])
+    bloom_half_blur_fbo = ctx.framebuffer(color_attachments=[bloom_half_tex])
+
+    bloom_quarter_tex = ctx.texture((qw, qh), 4, dtype='f2')
+    bloom_quarter_tex.filter = (ctx.LINEAR, ctx.LINEAR)
+    bloom_quarter_temp = ctx.texture((qw, qh), 4, dtype='f2')
+    bloom_quarter_temp.filter = (ctx.LINEAR, ctx.LINEAR)
+    bloom_down_fbo = ctx.framebuffer(color_attachments=[bloom_quarter_tex])
+    bloom_quarter_temp_fbo = ctx.framebuffer(color_attachments=[bloom_quarter_temp])
+    bloom_quarter_blur_fbo = ctx.framebuffer(color_attachments=[bloom_quarter_tex])
+
+    bloom_fbos = {
+        "fbos": (bloom_extract_fbo, bloom_half_temp_fbo, bloom_half_blur_fbo, bloom_down_fbo, bloom_quarter_temp_fbo, bloom_quarter_blur_fbo),
+        "textures": (bloom_half_tex, bloom_half_temp, bloom_quarter_tex, bloom_quarter_temp),
+    }
+
     with open(base_dir / "shaders" / "post_vert.glsl", encoding="utf-8") as f:
         p_vert = f.read()
     with open(base_dir / "shaders" / "post_frag.glsl", encoding="utf-8") as f:
         p_frag = f.read()
+    with open(base_dir / "shaders" / "bloom_extract_frag.glsl", encoding="utf-8") as f:
+        extract_frag = f.read()
+    with open(base_dir / "shaders" / "bloom_blur_frag.glsl", encoding="utf-8") as f:
+        blur_frag = f.read()
+
     post_prog = ctx.program(vertex_shader=p_vert, fragment_shader=p_frag)
+    extract_prog = ctx.program(vertex_shader=p_vert, fragment_shader=extract_frag)
+    blur_prog = ctx.program(vertex_shader=p_vert, fragment_shader=blur_frag)
 
     quad_data = np.array([
         -1.0, -1.0, 0.0, 0.0,
@@ -129,7 +240,7 @@ def run_tests():
     print(f"Bulge stars: {bulge.num_stars:,}")
     print(f"Total stars: {disk.num_stars + bar.num_stars + bulge.num_stars:,}")
 
-    render_scene(ctx, fbo, color_tex, post_fbo, post_prog, quad_vao, width, height, disk, bar, bulge, test_cases, out_dir, prefix="pop_")
+    render_scene(ctx, fbo, scene_tex, post_fbo, post_prog, extract_prog, blur_prog, quad_vao, width, height, disk, bar, bulge, test_cases, out_dir, prefix="pop_", bloom_fbos=bloom_fbos)
 
     print("\n--- 2. Testing Diagnostic Population Classes (O=Magenta, B=Cyan, A=White, F=Yellow-Green, G=Yellow, K=Orange, M=Red) ---")
     diag_nebula = NebulaManager(diagnostic_mode=True)
@@ -141,7 +252,7 @@ def run_tests():
         {"name": "diagnostic_face_on", "incl": math.radians(15.0), "azim": 0.0, "dist": 40.0, "rot": 0.0},
         {"name": "diagnostic_oblique", "incl": math.radians(65.0), "azim": 0.0, "dist": 35.0, "rot": 0.0},
     ]
-    render_scene(ctx, fbo, color_tex, post_fbo, post_prog, quad_vao, width, height, diag_disk, diag_bar, diag_bulge, diag_test_cases, out_dir, prefix="")
+    render_scene(ctx, fbo, scene_tex, post_fbo, post_prog, extract_prog, blur_prog, quad_vao, width, height, diag_disk, diag_bar, diag_bulge, diag_test_cases, out_dir, prefix="", bloom_fbos=bloom_fbos)
 
     print("\n--- 3. Testing Scientific Face-on Galactic Map Overlay (Key M) ---")
     from galactic_map import GalacticMap
@@ -153,7 +264,7 @@ def run_tests():
         {"name": "scientific_map_rotated", "incl": math.radians(2.0), "azim": 0.0, "dist": 42.0, "rot": math.radians(35.0)},
         {"name": "scientific_map_full_galaxy", "incl": math.radians(2.0), "azim": 0.0, "dist": 110.0, "rot": 0.0},
     ]
-    render_scene(ctx, fbo, color_tex, post_fbo, post_prog, quad_vao, width, height, disk, bar, bulge, map_test_cases, out_dir, prefix="", g_map=g_map)
+    render_scene(ctx, fbo, scene_tex, post_fbo, post_prog, extract_prog, blur_prog, quad_vao, width, height, disk, bar, bulge, map_test_cases, out_dir, prefix="", g_map=g_map, bloom_fbos=bloom_fbos)
 
     print("\n--- 4. Testing Differential Galactic Rotation Over Time ---")
     # Verify rotation curve analytically
@@ -176,7 +287,7 @@ def run_tests():
         {"name": "diff_rotation_t60", "incl": math.radians(20.0), "azim": 0.0, "dist": 40.0, "rot": disk.pattern_speed * 60.0, "sim_time": 60.0},
         {"name": "diff_oblique_t30", "incl": math.radians(60.0), "azim": 0.0, "dist": 35.0, "rot": disk.pattern_speed * 30.0, "sim_time": 30.0},
     ]
-    render_scene(ctx, fbo, color_tex, post_fbo, post_prog, quad_vao, width, height, disk, bar, bulge, diff_test_cases, out_dir, prefix="")
+    render_scene(ctx, fbo, scene_tex, post_fbo, post_prog, extract_prog, blur_prog, quad_vao, width, height, disk, bar, bulge, diff_test_cases, out_dir, prefix="", bloom_fbos=bloom_fbos)
 
     print("\nAll tests completed successfully!")
 

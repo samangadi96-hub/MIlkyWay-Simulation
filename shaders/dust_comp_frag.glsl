@@ -97,5 +97,7 @@ void main() {
         final_color = final_color * eff_dust_trans * dustTint;
     }
 
-    fragColor = vec4(final_color, scene.a);
+    // Output composited HDR color in RGB, and effective dust transmittance in Alpha
+    // (used by post-processing to protect dark dust silhouettes from bloom wash-out)
+    fragColor = vec4(final_color, eff_dust_trans);
 }
