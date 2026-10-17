@@ -27,61 +27,91 @@ class GalacticDisk:
         # ==========================================================
         ARM_COUNT = 4
         SPIRAL_TIGHTNESS = 2.5      # 'b' in theta = b * log(r/r0)
-        ARM_WIDTH = 0.35       # Base angular width
-        ARM_STRENGTH = 0.85     # Max proportion of stars in arms
-        INNER_RADIUS = 2.0
+        ARM_WIDTH = 0.35            # Base angular width
+        ARM_STRENGTH = 0.80         # Proportion of stars in arms
+        INNER_ARM_RADIUS = 3.5      # Where arms emerge smoothly around bar ends
         OUTER_RADIUS = 45.0
-        BULGE_RADIUS = 6.0          # Where arms fully emerge
         
         DISK_SCALE = 8.0
         
-        # 1. Generate Radii
-        # Use Gamma distribution (shape=2) to get probability P(r) ~ r * exp(-r / DISK_SCALE)
-        # This accounts for increasing circumference area at larger radii.
-        radius = rng.gamma(shape=2.0, scale=DISK_SCALE, size=self.num_stars)
+        # In-plane bar orientation in polar coordinates (matches GalacticBar 28 deg tilt)
+        BAR_ANGLE_POLAR = np.pi / 2.0 - 0.488  # ~ 1.0828 rad (62.0 degrees)
         
-        # Truncate via rejection sampling instead of clipping to avoid artificial rings
-        invalid = (radius < INNER_RADIUS) | (radius > OUTER_RADIUS)
-        while np.any(invalid):
-            radius[invalid] = rng.gamma(shape=2.0, scale=DISK_SCALE, size=np.sum(invalid))
-            invalid = (radius < INNER_RADIUS) | (radius > OUTER_RADIUS)
-        
-        # 2. Determine Arm vs Inter-arm Population (Density Waves)
-        # Arms emerge smoothly from the bulge
-        def smoothstep(edge0, edge1, x):
-            t = np.clip((x - edge0) / (edge1 - edge0), 0.0, 1.0)
+        def smoothstep_np(e0, e1, x):
+            t = np.clip((x - e0) / (e1 - e0), 0.0, 1.0)
             return t * t * (3.0 - 2.0 * t)
-            
-        arm_strength = smoothstep(INNER_RADIUS, BULGE_RADIUS, radius)
         
-        # Probability of a star belonging to an arm
-        p_arm = ARM_STRENGTH * arm_strength
-        is_arm = rng.random(self.num_stars) < p_arm
+        # 1. Determine Arm vs Inter-arm Membership
+        is_arm = rng.random(self.num_stars) < ARM_STRENGTH
+        num_arm_stars = np.sum(is_arm)
+        num_inter_stars = self.num_stars - num_arm_stars
+        
+        # 2. Sample Radii for Arms and Inter-arm Populations
+        radius = np.zeros(self.num_stars, dtype=np.float64)
+        
+        # Arm stars: emerge smoothly from inner bar region (r >= 3.5) and sweep outwards
+        r_arm = rng.gamma(shape=2.0, scale=DISK_SCALE, size=num_arm_stars)
+        inv_arm = (r_arm < INNER_ARM_RADIUS) | (r_arm > OUTER_RADIUS)
+        while np.any(inv_arm):
+            r_arm[inv_arm] = rng.gamma(shape=2.0, scale=DISK_SCALE, size=np.sum(inv_arm))
+            inv_arm = (r_arm < INNER_ARM_RADIUS) | (r_arm > OUTER_RADIUS)
+        radius[is_arm] = r_arm
+        
+        # Inter-arm stars: smoothly sample throughout the disk
+        r_inter = rng.gamma(shape=2.0, scale=DISK_SCALE, size=num_inter_stars)
+        inv_inter = (r_inter < 3.2) | (r_inter > OUTER_RADIUS)
+        while np.any(inv_inter):
+            r_inter[inv_inter] = rng.gamma(shape=2.0, scale=DISK_SCALE, size=np.sum(inv_inter))
+            inv_inter = (r_inter < 3.2) | (r_inter > OUTER_RADIUS)
         
         # 3. Calculate Angles
         theta = np.zeros(self.num_stars)
         
-        # Inter-arm stars: uniformly distributed in angle
-        theta[~is_arm] = rng.uniform(0.0, 2.0 * np.pi, np.sum(~is_arm))
+        # Arm stars: distributed along logarithmic spirals aligned with bar tips
+        # At r = 7.0, Arm 0 matches near bar tip and Arm 2 matches far bar tip
+        ARM_BASE_OFFSET = BAR_ANGLE_POLAR - SPIRAL_TIGHTNESS * np.log(7.0 / INNER_ARM_RADIUS)
         
-        # Arm stars: distributed along logarithmic spirals
-        num_arm_stars = np.sum(is_arm)
-        
-        # Slightly vary density between arms to make it less perfect
-        arm_probs = np.array([0.27, 0.23, 0.26, 0.24])
+        arm_probs = np.array([0.28, 0.22, 0.28, 0.22])  # Scutum-Centaurus & Perseus dominant
         arm_indices = rng.choice(ARM_COUNT, p=arm_probs, size=num_arm_stars)
-        arm_base_angles = arm_indices * (2 * np.pi / ARM_COUNT)
+        arm_base_angles = arm_indices * (2 * np.pi / ARM_COUNT) + ARM_BASE_OFFSET
         
-        # Base logarithmic spiral angle: theta = theta0 + b * log(r / r0)
-        ideal_theta = arm_base_angles + SPIRAL_TIGHTNESS * np.log(radius[is_arm] / INNER_RADIUS)
+        # Logarithmic spiral angle: theta = theta0 + b * log(r / INNER_ARM_RADIUS)
+        ideal_theta = arm_base_angles + SPIRAL_TIGHTNESS * np.log(radius[is_arm] / INNER_ARM_RADIUS)
         
-        # Slightly vary width between arms
-        arm_widths = np.array([1.0, 1.1, 0.9, 1.05]) * ARM_WIDTH
-        
-        # Angular spread: tighter near the core, slightly wider at the edges
+        arm_widths = np.array([1.0, 1.1, 0.95, 1.05]) * ARM_WIDTH
         spread = rng.normal(0.0, arm_widths[arm_indices], num_arm_stars)
-        
         theta[is_arm] = ideal_theta + spread
+        
+        # Inter-arm stars: smoothly depleted along the bar minor axis inside r < 7.5
+        # (astrophysical inter-bar resonance cavity, completely free of circular step discontinuities)
+        theta_inter = rng.uniform(0.0, 2.0 * np.pi, num_inter_stars)
+        minor_axis_prox = np.abs(np.sin(theta_inter - BAR_ANGLE_POLAR))  # 1.0 along minor axis, 0.0 along bar major axis
+        depletion = np.where(r_inter < 7.5, (1.0 - smoothstep_np(3.0, 7.5, r_inter)) * (0.88 * minor_axis_prox), 0.0)
+        rejected = rng.random(num_inter_stars) < depletion
+        
+        attempts = 0
+        while np.any(rejected) and attempts < 10:
+            n_rej = np.sum(rejected)
+            new_r = rng.gamma(shape=2.0, scale=DISK_SCALE, size=n_rej)
+            inv = (new_r < 3.2) | (new_r > OUTER_RADIUS)
+            while np.any(inv):
+                new_r[inv] = rng.gamma(shape=2.0, scale=DISK_SCALE, size=np.sum(inv))
+                inv = (new_r < 3.2) | (new_r > OUTER_RADIUS)
+            new_th = rng.uniform(0.0, 2.0 * np.pi, n_rej)
+            new_prox = np.abs(np.sin(new_th - BAR_ANGLE_POLAR))
+            new_dep = np.where(new_r < 7.5, (1.0 - smoothstep_np(3.0, 7.5, new_r)) * (0.88 * new_prox), 0.0)
+            acc = rng.random(n_rej) >= new_dep
+            if np.any(acc):
+                sub_indices = np.where(rejected)[0][acc]
+                r_inter[sub_indices] = new_r[acc]
+                theta_inter[sub_indices] = new_th[acc]
+            curr_prox = np.abs(np.sin(theta_inter - BAR_ANGLE_POLAR))
+            curr_dep = np.where(r_inter < 7.5, (1.0 - smoothstep_np(3.0, 7.5, r_inter)) * (0.88 * curr_prox), 0.0)
+            rejected = rng.random(num_inter_stars) < curr_dep
+            attempts += 1
+            
+        radius[~is_arm] = r_inter
+        theta[~is_arm] = theta_inter
         
         # 4. 3D Structure
         x = radius * np.cos(theta)
@@ -102,7 +132,7 @@ class GalacticDisk:
         arm_factor = np.zeros(self.num_stars, dtype=np.float64)
         if num_arm_stars > 0:
             norm_spread = np.abs(spread) / arm_widths[arm_indices]
-            arm_factor[is_arm] = np.exp(-0.5 * (norm_spread ** 2)) * arm_strength[is_arm]
+            arm_factor[is_arm] = np.exp(-0.5 * (norm_spread ** 2))
             
         from stellar_population import generate_stellar_population
         colors, sizes, brightness = generate_stellar_population(

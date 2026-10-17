@@ -12,7 +12,7 @@ from galactic_disk import GalacticDisk
 from nebula import NebulaManager
 
 
-def render_scene(ctx, fbo, width, height, disk, bar, bulge, test_cases, out_dir, prefix=""):
+def render_scene(ctx, fbo, color_tex, post_fbo, post_prog, quad_vao, width, height, disk, bar, bulge, test_cases, out_dir, prefix="", g_map=None):
     aspect_ratio = width / height
     lod_mgr = LODManager()
 
@@ -45,7 +45,7 @@ def render_scene(ctx, fbo, width, height, disk, bar, bulge, test_cases, out_dir,
                 star_vis = 0.55 * (1.0 - t) + base_at_11 * t
 
         fbo.use()
-        ctx.clear(0.01, 0.01, 0.015, 1.0, depth=1.0)
+        ctx.clear(0.005, 0.005, 0.008, 1.0, depth=1.0)
         ctx.enable(ctx.DEPTH_TEST)
         ctx.depth_mask = True
         ctx.blend_func = (ctx.SRC_ALPHA, ctx.ONE)
@@ -54,7 +54,19 @@ def render_scene(ctx, fbo, width, height, disk, bar, bulge, test_cases, out_dir,
         bar.render(cam, aspect_ratio, star_vis, tc["rot"])
         bulge.render(cam, aspect_ratio, star_vis, tc["rot"])
 
-        raw = fbo.read(components=3)
+        # Post-processing pass: bloom + ACES tonemapping
+        post_fbo.use()
+        ctx.clear(0.02, 0.02, 0.03, 1.0)
+        ctx.disable(ctx.DEPTH_TEST)
+        color_tex.use(location=0)
+        post_prog["scene"].value = 0
+        quad_vao.render(mode=ctx.TRIANGLE_STRIP)
+
+        # Scientific map overlay pass
+        if g_map is not None:
+            g_map.render(cam, aspect_ratio, tc["rot"])
+
+        raw = post_fbo.read(components=3)
         img = Image.frombytes("RGB", (width, height), raw)
         img = img.transpose(Image.FLIP_TOP_BOTTOM)
         filename = f"{prefix}{tc['name']}.png"
@@ -72,6 +84,25 @@ def run_tests():
     color_tex = ctx.texture((width, height), 4)
     depth_tex = ctx.depth_texture((width, height))
     fbo = ctx.framebuffer(color_attachments=[color_tex], depth_attachment=depth_tex)
+
+    # Post FBO
+    post_tex = ctx.texture((width, height), 4)
+    post_fbo = ctx.framebuffer(color_attachments=[post_tex])
+
+    with open(base_dir / "shaders" / "post_vert.glsl", encoding="utf-8") as f:
+        p_vert = f.read()
+    with open(base_dir / "shaders" / "post_frag.glsl", encoding="utf-8") as f:
+        p_frag = f.read()
+    post_prog = ctx.program(vertex_shader=p_vert, fragment_shader=p_frag)
+
+    quad_data = np.array([
+        -1.0, -1.0, 0.0, 0.0,
+         1.0, -1.0, 1.0, 0.0,
+        -1.0,  1.0, 0.0, 1.0,
+         1.0,  1.0, 1.0, 1.0,
+    ], dtype="f4")
+    quad_buf = ctx.buffer(quad_data)
+    quad_vao = ctx.vertex_array(post_prog, [(quad_buf, "2f 2f", "in_vert", "in_texcoord")])
 
     out_dir = base_dir / "test_renders"
     out_dir.mkdir(exist_ok=True)
@@ -97,7 +128,7 @@ def run_tests():
     print(f"Bulge stars: {bulge.num_stars:,}")
     print(f"Total stars: {disk.num_stars + bar.num_stars + bulge.num_stars:,}")
 
-    render_scene(ctx, fbo, width, height, disk, bar, bulge, test_cases, out_dir, prefix="pop_")
+    render_scene(ctx, fbo, color_tex, post_fbo, post_prog, quad_vao, width, height, disk, bar, bulge, test_cases, out_dir, prefix="pop_")
 
     print("\n--- 2. Testing Diagnostic Population Classes (O=Magenta, B=Cyan, A=White, F=Yellow-Green, G=Yellow, K=Orange, M=Red) ---")
     diag_nebula = NebulaManager(diagnostic_mode=True)
@@ -109,7 +140,19 @@ def run_tests():
         {"name": "diagnostic_face_on", "incl": math.radians(15.0), "azim": 0.0, "dist": 40.0, "rot": 0.0},
         {"name": "diagnostic_oblique", "incl": math.radians(65.0), "azim": 0.0, "dist": 35.0, "rot": 0.0},
     ]
-    render_scene(ctx, fbo, width, height, diag_disk, diag_bar, diag_bulge, diag_test_cases, out_dir, prefix="")
+    render_scene(ctx, fbo, color_tex, post_fbo, post_prog, quad_vao, width, height, diag_disk, diag_bar, diag_bulge, diag_test_cases, out_dir, prefix="")
+
+    print("\n--- 3. Testing Scientific Face-on Galactic Map Overlay (Key M) ---")
+    from galactic_map import GalacticMap
+    g_map = GalacticMap(ctx, base_dir)
+    g_map.enabled = True
+
+    map_test_cases = [
+        {"name": "scientific_map_face_on", "incl": math.radians(2.0), "azim": 0.0, "dist": 42.0, "rot": 0.0},
+        {"name": "scientific_map_rotated", "incl": math.radians(2.0), "azim": 0.0, "dist": 42.0, "rot": math.radians(35.0)},
+        {"name": "scientific_map_full_galaxy", "incl": math.radians(2.0), "azim": 0.0, "dist": 110.0, "rot": 0.0},
+    ]
+    render_scene(ctx, fbo, color_tex, post_fbo, post_prog, quad_vao, width, height, disk, bar, bulge, map_test_cases, out_dir, prefix="", g_map=g_map)
 
     print("\nAll tests completed successfully!")
 

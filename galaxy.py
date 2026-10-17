@@ -39,19 +39,19 @@ class GalacticBulge:
         core_count = int(self.num_stars * 0.65)
         halo_count = self.num_stars - core_count
         
-        # Core: dense exponential falloff around Sgr A*
-        r_core = rng.exponential(0.55, core_count)
+        # Core: dense steep exponential falloff around Sgr A*
+        r_core = rng.exponential(0.32, core_count)
         theta_core = rng.uniform(0.0, 2.0 * np.pi, core_count)
         phi_core = np.arccos(rng.uniform(-1.0, 1.0, core_count))
         
         x_core = r_core * np.sin(phi_core) * np.cos(theta_core)
         z_core = r_core * np.sin(phi_core) * np.sin(theta_core)
-        y_core = r_core * np.cos(phi_core) * 0.42
+        y_core = r_core * np.cos(phi_core) * 0.35
         
-        # Halo: compact spheroidal distribution (r <= 1.5)
-        x_halo = rng.normal(0.0, 0.95, halo_count)
-        z_halo = rng.normal(0.0, 0.95, halo_count)
-        y_halo = rng.normal(0.0, 0.45, halo_count)
+        # Halo: compact spheroidal nucleus (r <= 1.0)
+        x_halo = rng.normal(0.0, 0.45, halo_count)
+        z_halo = rng.normal(0.0, 0.45, halo_count)
+        y_halo = rng.normal(0.0, 0.28, halo_count)
         
         x = np.concatenate((x_core, x_halo))
         z = np.concatenate((z_core, z_halo))

@@ -6,8 +6,8 @@ out vec4 fragColor;
 
 const int samples = 48;
 const float radius = 0.018;
-const float threshold = 0.50;
-const float intensity = 1.6;
+const float threshold = 0.35;
+const float intensity = 1.4;
 const float GOLDEN_ANGLE = 2.39996323;
 
 void main() {
@@ -42,11 +42,20 @@ void main() {
     // If the base pixel is very dark, it is the void - do not add glow.
     float bloom_mask = smoothstep(0.0, 0.06, base_lum);
 
-    vec3 final_color = base_color + bloom * intensity * bloom_mask;
+    vec3 color = base_color + bloom * intensity * bloom_mask;
 
-    // ACES filmic tonemapping
-    final_color = (final_color * (2.51 * final_color + 0.03)) /
-                  (final_color * (2.43 * final_color + 0.59) + 0.14);
+    // Luminance-guided tonemapping preserves chromatic saturation of stellar populations
+    float lum = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    if (lum > 0.0001) {
+        float mapped_lum = (lum * (2.51 * lum + 0.03)) / (lum * (2.43 * lum + 0.59) + 0.14);
+        vec3 per_channel = (color * (2.51 * color + 0.03)) / (color * (2.43 * color + 0.59) + 0.14);
+        vec3 lum_scaled = color * (mapped_lum / lum);
+        color = mix(per_channel, lum_scaled, 0.42);
+        
+        // Subtle saturation enhancement to match reference image visual hierarchy
+        float final_lum = dot(color, vec3(0.2126, 0.7152, 0.0722));
+        color = mix(vec3(final_lum), color, 1.28);
+    }
 
-    fragColor = vec4(final_color, 1.0);
+    fragColor = vec4(clamp(color, 0.0, 1.0), 1.0);
 }

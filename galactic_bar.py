@@ -37,49 +37,44 @@ class GalacticBar:
         # ==========================================================
         # Procedural Bar Parameters (Milky Way scale)
         # ==========================================================
-        # Semi-major axis: reaches r ~ 7.2 where spiral arms fully form
+        # Semi-major axis: reaches r ~ 7.2 where spiral arms emerge
         BAR_LENGTH = 7.2
         
-        # In-plane orientation angle: aligns bar ends with inner spiral arms
-        # Arms 0 and 2 at r ~ 6.0 - 7.0
-        BAR_ANGLE = -0.349  # ~ -20 degrees
+        # In-plane orientation angle: 28 degrees (~0.488 rad) relative to Sun-GC (Z) axis
+        BAR_ANGLE_Z = 0.488
 
-        # Transverse in-plane semi-width at center (tight aspect ratio ~ 3.8 : 1)
-        BAR_WIDTH_0 = 0.82
+        # Transverse in-plane semi-width at center (aspect ratio ~ 3.5 : 1)
+        BAR_WIDTH_0 = 1.02
 
         # Vertical thickness base scale
-        BAR_HEIGHT_BASE = 0.50
+        BAR_HEIGHT_BASE = 0.46
 
         # Peanut lobe parameters (boxy/peanut bulge)
         PEANUT_PEAK_U = 2.2
-        PEANUT_LOBE_H = 0.65
+        PEANUT_LOBE_H = 0.62
 
         rng = np.random.default_rng(self.seed)
 
         # ==========================================================
         # 1. Major Axis (u) Sampling
         # ==========================================================
-        # To create a distinctly elongated stellar bar (not washed out into
-        # a sphere), we use a dual-component distribution:
-        # - 30% dense central bar core (concentrated around center)
-        # - 70% extended bar spine (Ferrers density profile with high density
-        #   sustained along the length, smoothly tapering at the tips)
-        n_core = int(self.num_stars * 0.30)
+        # 35% dense central core spine + 65% extended Ferrers profile
+        n_core = int(self.num_stars * 0.35)
         n_spine = self.num_stars - n_core
 
-        # Core component
-        u_core = rng.normal(0.0, 1.85, size=int(n_core * 1.25))
+        # Core component: concentrated along the central bar
+        u_core = rng.normal(0.0, 1.65, size=int(n_core * 1.25))
         u_core = u_core[np.abs(u_core) < BAR_LENGTH][:n_core]
         while len(u_core) < n_core:
-            extra = rng.normal(0.0, 1.85, size=n_core - len(u_core))
+            extra = rng.normal(0.0, 1.65, size=n_core - len(u_core))
             u_core = np.concatenate((u_core, extra[np.abs(extra) < BAR_LENGTH]))
         u_core = u_core[:n_core]
 
-        # Spine component: Ferrers profile P(u) ~ (1 - (u/L)^2)^0.65
+        # Spine component: Ferrers profile P(u) ~ (1 - (u/L)^2)^0.50
         u_spine = []
         while len(u_spine) < n_spine:
             cand = rng.uniform(-BAR_LENGTH, BAR_LENGTH, size=(n_spine - len(u_spine)) * 2)
-            p = (1.0 - (cand / BAR_LENGTH) ** 2) ** 0.65
+            p = np.sqrt(np.maximum(0.0, 1.0 - (cand / BAR_LENGTH) ** 2))
             acc = cand[rng.random(len(cand)) < p]
             u_spine.extend(acc)
         u_spine = np.array(u_spine[:n_spine])
@@ -90,49 +85,55 @@ class GalacticBar:
         # ==========================================================
         # 2. Minor In-Plane Axis (v) Sampling
         # ==========================================================
-        # Elliptical spindle width: narrow and well-defined, tapering toward the ends
+        # Elliptical spindle width: 3.5:1 aspect ratio, tapering towards tips
         u_norm = u_abs / BAR_LENGTH
-        width_profile = np.sqrt(np.maximum(0.04, 1.0 - 0.78 * (u_norm ** 2)))
-        v = rng.normal(0.0, BAR_WIDTH_0 * width_profile, size=self.num_stars)
+        width_profile = np.sqrt(np.maximum(0.12, 1.0 - 0.75 * (u_norm ** 2)))
+        # Inner spine is even tighter for core stars
+        is_core_star = np.arange(self.num_stars) < n_core
+        v_scale = np.where(is_core_star, BAR_WIDTH_0 * 0.65, BAR_WIDTH_0) * width_profile
+        v = rng.normal(0.0, v_scale, size=self.num_stars)
 
         # Smooth pitch curvature at the tips: as the bar ends reach the inner arms,
-        # they smoothly curve into the logarithmic spiral pitch direction
+        # they curve naturally into the logarithmic spiral pitch direction
         def smoothstep_np(e0, e1, x):
             t = np.clip((x - e0) / (e1 - e0), 0.0, 1.0)
             return t * t * (3.0 - 2.0 * t)
 
-        tip_curve = np.sign(u) * smoothstep_np(4.5, BAR_LENGTH, u_abs) * 0.52 * (u_abs - 4.5)
+        tip_curve = np.sign(u) * smoothstep_np(4.5, BAR_LENGTH, u_abs) * 0.45 * (u_abs - 4.5)
         v += tip_curve
 
         # ==========================================================
         # 3. Vertical Axis (w / height) - Boxy / Peanut Structure
         # ==========================================================
         # Real galactic bars exhibit a peanut/boxy profile due to vertical
-        # buckling resonances, peaking around |u| ~ 1.6 - 2.8 and tapering thin
+        # buckling resonances, peaking around |u| ~ 1.8 - 2.6 and tapering thin
         # toward the ends to match the surrounding stellar disk.
-        h_disk_blend = BAR_HEIGHT_BASE * (1.0 - 0.55 * smoothstep_np(3.2, BAR_LENGTH, u_abs))
+        h_disk_blend = BAR_HEIGHT_BASE * (1.0 - 0.50 * smoothstep_np(3.2, BAR_LENGTH, u_abs))
         lobe_elevation = PEANUT_LOBE_H * (u_abs / PEANUT_PEAK_U) * np.exp(1.0 - (u_abs / PEANUT_PEAK_U) ** 1.35)
 
-        # 45% of stars in the resonant zone (0.7 < |u| < 4.0) populate the upper and lower peanut lobes
-        is_peanut_zone = (u_abs > 0.7) & (u_abs < 4.0)
-        in_lobe = is_peanut_zone & (rng.random(self.num_stars) < 0.45)
+        # 40% of stars in the resonant zone (0.8 < |u| < 3.8) populate peanut lobes
+        is_peanut_zone = (u_abs > 0.8) & (u_abs < 3.8)
+        in_lobe = is_peanut_zone & (rng.random(self.num_stars) < 0.40)
         lobe_sign = rng.choice([-1.0, 1.0], size=self.num_stars)
 
         w = np.zeros(self.num_stars, dtype=np.float64)
-        w[in_lobe] = lobe_sign[in_lobe] * lobe_elevation[in_lobe] + rng.normal(0.0, 0.24, size=np.sum(in_lobe))
+        w[in_lobe] = lobe_sign[in_lobe] * lobe_elevation[in_lobe] + rng.normal(0.0, 0.22, size=np.sum(in_lobe))
 
         # The remaining stars form the continuous core and disc plane
-        core_boost = 0.18 * np.exp(-0.5 * ((u_abs[~in_lobe] - PEANUT_PEAK_U) / 1.2) ** 2)
+        core_boost = 0.16 * np.exp(-0.5 * ((u_abs[~in_lobe] - PEANUT_PEAK_U) / 1.2) ** 2)
         w[~in_lobe] = rng.normal(0.0, h_disk_blend[~in_lobe] + core_boost)
 
         # ==========================================================
         # 4. Transform from Bar-Local (u, v, w) to Galactic (x, y, z)
         # ==========================================================
-        cos_a = np.cos(BAR_ANGLE)
-        sin_a = np.sin(BAR_ANGLE)
+        # Major axis u tilted at BAR_ANGLE_Z (~28 deg) relative to Z (Sun-GC line):
+        # x = u * sin(BAR_ANGLE_Z) - v * cos(BAR_ANGLE_Z)
+        # z = u * cos(BAR_ANGLE_Z) + v * sin(BAR_ANGLE_Z)
+        sin_b = np.sin(BAR_ANGLE_Z)
+        cos_b = np.cos(BAR_ANGLE_Z)
 
-        x = u * cos_a - v * sin_a
-        z = u * sin_a + v * cos_a
+        x = u * sin_b - v * cos_b
+        z = u * cos_b + v * sin_b
         y = w
 
         # Maintain a clean horizon around Sgr A* (r >= 0.25)

@@ -13,6 +13,7 @@ from renderer import Renderer
 from galaxy import GalacticBulge, GalacticBar
 from galactic_disk import GalacticDisk
 from nebula import NebulaManager
+from galactic_map import GalacticMap
 
 class MilkyWaySimulation(mglw.WindowConfig):
 
@@ -36,6 +37,7 @@ class MilkyWaySimulation(mglw.WindowConfig):
         self.bar         = GalacticBar(self.ctx, Path(__file__).parent)
         self.nebula_mgr  = NebulaManager()
         self.galactic_disk = GalacticDisk(self.ctx, Path(__file__).parent, nebula_stars=self.nebula_mgr.get_stars_array())
+        self.galactic_map  = GalacticMap(self.ctx, Path(__file__).parent)
         
         self.galaxy_rotation_angle = 0.0
 
@@ -64,6 +66,7 @@ class MilkyWaySimulation(mglw.WindowConfig):
         print('  R                -> reset camera')
         print('  T                -> toggle dust debug')
         print('  N                -> toggle nebula debug')
+        print('  M                -> toggle scientific galactic map overlay')
         print('  --------------------------------')
         print()
 
@@ -351,6 +354,11 @@ class MilkyWaySimulation(mglw.WindowConfig):
 
             elif key == self.wnd.keys.N:
                 self.debug_nebula = not self.debug_nebula
+
+            elif key == self.wnd.keys.M:
+                self.galactic_map.enabled = not self.galactic_map.enabled
+                status = "ON" if self.galactic_map.enabled else "OFF"
+                print(f"\n[Map] Scientific Galactic Map Overlay: {status}")
 
         elif action == self.wnd.keys.ACTION_RELEASE:
 
@@ -784,6 +792,16 @@ class MilkyWaySimulation(mglw.WindowConfig):
         self.post_program["scene"].value = 0
 
         self.quad_vao.render(mode=self.ctx.TRIANGLE_STRIP)
+
+        # ----------------------------------------------------------
+        # PASS 3: Scientific Face-on Galactic Map Overlay (Key M)
+        # ----------------------------------------------------------
+        if self.galactic_map.enabled:
+            self.galactic_map.render(
+                self.camera,
+                bh.aspect_ratio,
+                self.galaxy_rotation_angle
+            )
 
 
 if __name__ == "__main__":
