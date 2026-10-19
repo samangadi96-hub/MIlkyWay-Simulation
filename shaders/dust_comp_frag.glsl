@@ -13,6 +13,10 @@ uniform bool u_debugNebula;
 uniform float u_nearPlane;
 uniform float u_farPlane;
 
+uniform mat4 u_invVP;
+uniform vec3 u_camPos;
+uniform vec3 u_camForward;
+
 float linearizeDepth(float d) {
     float ndc_z = d * 2.0 - 1.0;
     return (2.0 * u_nearPlane * u_farPlane) / (u_farPlane + u_nearPlane - ndc_z * (u_farPlane - u_nearPlane));
@@ -40,11 +44,19 @@ void main() {
 
     float rawDepth = texture(u_sceneDepth, uv).r;
     float sceneLinearDepth = linearizeDepth(rawDepth);
+
+    // Compute ray direction for consistent Euclidean distance convention
+    vec2 ndc = uv * 2.0 - 1.0;
+    vec4 target = u_invVP * vec4(ndc, 1.0, 1.0);
+    vec3 rd = normalize(target.xyz / target.w - u_camPos);
     
-    // Default to background depth if nothing rendered
-    if (rawDepth > 0.9999) {
-        sceneLinearDepth = 10000.0;
-    }
+    // View ray cosine with camera optical axis
+    float cosTheta = dot(rd, u_camForward);
+    if (cosTheta <= 0.001) cosTheta = 1.0;
+    
+    // Convert scene planar view depth into Euclidean ray distance from camera,
+    // exactly matching the volume ray distances of dust and nebulae.
+    float sceneRayDistance = (rawDepth > 0.9999) ? 10000.0 : (sceneLinearDepth / cosTheta);
 
     float dustFrontDepth = dust_depth_norm * 200.0;
     // We clear to 1.0, so if < 0.999 we hit a nebula
@@ -53,17 +65,17 @@ void main() {
     bool has_dust = dust_depth_norm > 0.001;
     bool has_nebula = nebula_depth_norm < 0.999 && (1.0 - nebula_col.a > 0.001 || dot(nebula_col.rgb, vec3(1.0)) > 0.001);
     
-    // Scene occlusion factors
+    // Scene occlusion factors using consistent Euclidean ray distance
     float dustDepthFactor = 1.0;
     if (has_dust) {
         float transitionWidth = dustFrontDepth * 0.15 + 0.5;
-        dustDepthFactor = smoothstep(dustFrontDepth - transitionWidth, dustFrontDepth + transitionWidth * 0.3, sceneLinearDepth);
+        dustDepthFactor = smoothstep(dustFrontDepth - transitionWidth, dustFrontDepth + transitionWidth * 0.3, sceneRayDistance);
     }
     
     float nebDepthFactor = 1.0;
     if (has_nebula) {
         float n_transitionWidth = nebFrontDepth * 0.15 + 0.5;
-        nebDepthFactor = smoothstep(nebFrontDepth - n_transitionWidth, nebFrontDepth + n_transitionWidth * 0.3, sceneLinearDepth);
+        nebDepthFactor = smoothstep(nebFrontDepth - n_transitionWidth, nebFrontDepth + n_transitionWidth * 0.3, sceneRayDistance);
     }
     
     float eff_dust_trans = mix(1.0, dust_trans, dustDepthFactor);

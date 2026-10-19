@@ -26,10 +26,14 @@ void main() {
     float dist = max(0.1, -view_pos.z);
     float proj_size = in_size * (340.0 / dist);
     
-    // Conserve subpixel flux when zooming out:
-    // Preserves the distinct elongated morphology and luminous contrast of the
-    // central bar and bulge at far distances without premature dimming.
-    float subpixel_factor = clamp(pow(proj_size / 1.0, 0.20), 0.80, 1.0);
+    // Flux-conserving subpixel attenuation:
+    // When a star is smaller than 1 pixel, its point size is clamped to 1.0.
+    // To conserve total flux and prevent millions of unresolved stars from
+    // overwhelming the detector, attenuate energy by projected subpixel coverage.
+    float subpixel_factor = 1.0;
+    if (proj_size < 1.0) {
+        subpixel_factor = clamp(pow(proj_size, 1.6), 0.002, 1.0);
+    }
     
     gl_PointSize = clamp(proj_size, 1.0, 24.0);
     

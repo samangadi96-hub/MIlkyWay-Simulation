@@ -179,15 +179,28 @@ class GalacticDisk:
 
         star_data = np.column_stack((positions, colors, sizes, brightness)).astype('f4')
 
-        if nebula_stars is not None and len(nebula_stars) > 0:
-            star_data = np.vstack((star_data, nebula_stars))
-            self.num_stars += len(nebula_stars)
-
         self.vbo = self.ctx.buffer(star_data.tobytes())
         self.vao = self.ctx.vertex_array(
             self.program,
             [(self.vbo, '3f 3f 1f 1f', 'in_position', 'in_color', 'in_size', 'in_brightness')]
         )
+
+        # Nebula-associated stars: rotate rigidly at pattern speed with the nebulae
+        # so differential shearing never separates young stellar clusters from their parent clouds.
+        self.nebula_vao = None
+        if nebula_stars is not None and len(nebula_stars) > 0:
+            with open(self.base_dir / "shaders" / "bulge_vert.glsl", encoding="utf-8") as f:
+                neb_vert_code = f.read()
+            self.nebula_program = self.ctx.program(
+                vertex_shader=neb_vert_code,
+                fragment_shader=frag_code,
+            )
+            self.nebula_vbo = self.ctx.buffer(np.ascontiguousarray(nebula_stars, dtype='f4').tobytes())
+            self.nebula_vao = self.ctx.vertex_array(
+                self.nebula_program,
+                [(self.nebula_vbo, '3f 3f 1f 1f', 'in_position', 'in_color', 'in_size', 'in_brightness')]
+            )
+            self.num_stars += len(nebula_stars)
 
     def render(self, camera, aspect_ratio, visibility, rotation_angle, sim_time=0.0):
         if visibility <= 0.001:
@@ -204,8 +217,8 @@ class GalacticDisk:
             self.program["u_view"].write(camera.get_view_matrix())
         if "u_projection" in self.program:
             self.program["u_projection"].write(camera.get_projection_matrix(aspect_ratio))
+        model = glm.rotate(glm.mat4(1.0), rotation_angle, glm.vec3(0.0, 1.0, 0.0))
         if "u_model" in self.program:
-            model = glm.rotate(glm.mat4(1.0), rotation_angle, glm.vec3(0.0, 1.0, 0.0))
             self.program["u_model"].write(model)
 
         # GPU-side differential rotation and density wave uniforms
@@ -227,3 +240,15 @@ class GalacticDisk:
             self.program["u_compression"].value = self.compression
 
         self.vao.render(moderngl.POINTS)
+
+        # Render nebula-associated stars with coherent pattern speed
+        if self.nebula_vao is not None:
+            if "u_visibility" in self.nebula_program:
+                self.nebula_program["u_visibility"].value = visibility
+            if "u_view" in self.nebula_program:
+                self.nebula_program["u_view"].write(camera.get_view_matrix())
+            if "u_projection" in self.nebula_program:
+                self.nebula_program["u_projection"].write(camera.get_projection_matrix(aspect_ratio))
+            if "u_model" in self.nebula_program:
+                self.nebula_program["u_model"].write(model)
+            self.nebula_vao.render(moderngl.POINTS)

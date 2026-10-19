@@ -75,19 +75,24 @@ void main() {
     float dist = max(0.1, -view_pos.z);
     float proj_size = in_size * (340.0 / dist);
     
-    // Subpixel flux conservation: preserves visibility and contrast at far zoom
-    float subpixel_factor = clamp(pow(proj_size / 1.0, 0.28), 0.70, 1.0);
+    // Flux-conserving subpixel attenuation:
+    // Scale unresolved star contribution with projected coverage to prevent
+    // millions of background stars from accumulating excessive energy.
+    float subpixel_factor = 1.0;
+    if (proj_size < 1.0) {
+        subpixel_factor = clamp(pow(proj_size, 1.6), 0.002, 1.0);
+    }
     gl_PointSize = clamp(proj_size, 1.0, 24.0);
     
     // Wave proximity factor for astrophysical luminosity enhancement
     // (young OB stars and emission peaks along density wave shock)
     float arm_prox = 0.5 + 0.5 * cos(psi_wrap);
-    float lum_boost = mix(0.75, 1.30, pow(arm_prox, 1.8) * r_mask);
+    float lum_boost = mix(0.85, 1.15, pow(arm_prox, 1.8) * r_mask);
     
     // Color modulation: subtle blue starburst enrichment in density wave shock
     vec3 star_color = in_color;
-    vec3 shock_blue = vec3(0.72, 0.88, 1.05);
-    star_color = mix(star_color, star_color * shock_blue, pow(arm_prox, 1.5) * 0.35 * r_mask);
+    vec3 shock_blue = vec3(0.85, 0.94, 1.05);
+    star_color = mix(star_color, star_color * shock_blue, pow(arm_prox, 1.5) * 0.25 * r_mask);
     
     v_color = star_color * in_brightness * u_visibility * subpixel_factor * lum_boost;
 }

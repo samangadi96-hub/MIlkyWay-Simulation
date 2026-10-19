@@ -220,67 +220,91 @@ float getDustDensity(vec3 p) {
 }
 
 
+vec2 intersectCylinder(vec3 ro, vec3 rd, float R) {
+    float a = rd.x * rd.x + rd.z * rd.z;
+    if (a < 1e-7) {
+        float r2 = ro.x * ro.x + ro.z * ro.z;
+        if (r2 < R * R) return vec2(0.0, 300.0);
+        return vec2(0.0, -1.0);
+    }
+    float b = 2.0 * (ro.x * rd.x + ro.z * rd.z);
+    float c = ro.x * ro.x + ro.z * ro.z - R * R;
+    float disc = b * b - 4.0 * a * c;
+    if (disc < 0.0) return vec2(0.0, -1.0);
+    float s = sqrt(disc);
+    float t1 = (-b - s) / (2.0 * a);
+    float t2 = (-b + s) / (2.0 * a);
+    return vec2(min(t1, t2), max(t1, t2));
+}
+
 void main() {
-    // 1. Reconstruct ray direction
+    // 1. Reconstruct ray direction in world space
     vec2 ndc = v_uv * 2.0 - 1.0;
     vec4 target = u_invVP * vec4(ndc, 1.0, 1.0);
     vec3 rd = normalize(target.xyz / target.w - u_camPos);
     vec3 ro = u_camPos;
 
-    // 2. Intersect with galactic dust slab
-    // Height varies: thicker slab to encompass the full dust volume
-    float slab_H = 2.0;
-    vec2 t_bounds = intersectSlab(ro, rd, slab_H);
+    // Transform ray to local galaxy space
+    vec3 ro_local = (u_galaxyModel * vec4(ro, 1.0)).xyz;
+    vec3 rd_local = normalize((u_galaxyModel * vec4(rd, 0.0)).xyz);
+
+    // 2. Intersect with galactic dust slab (|y| <= slab_H)
+    float slab_H = 1.8;
+    vec2 t_slab = intersectSlab(ro_local, rd_local, slab_H);
+
+    // 3. Intersect with active galactic disk cylinder (r <= 47.0)
+    vec2 t_cyl = intersectCylinder(ro_local, rd_local, 47.0);
 
     float optical_depth = 0.0;
     float front_depth = -1.0;   // linear distance to first significant dust
 
-    if (t_bounds.y > t_bounds.x && u_dustWeight > 0.001) {
-        float t = t_bounds.x;
-        float t_end = min(t_bounds.y, 150.0);
+    if (t_slab.y > t_slab.x && t_cyl.y > t_cyl.x && u_dustWeight > 0.001) {
+        float t_start = max(max(0.0, t_slab.x), t_cyl.x);
+        float t_end = min(min(t_slab.y, t_cyl.y), 160.0);
 
-        // Adaptive step count: use more steps when the path through dust is short
-        // (which means we're close and need detail) but stay within budget
-        int steps = 32;
-        float dt = (t_end - t) / float(steps);
+        if (t_end > t_start) {
+            // Adaptive sampling: guarantee step size is fine enough to resolve
+            // narrow dust lanes (lane half-width ~0.06-0.18) without exceeding GPU budget
+            float path_len = t_end - t_start;
+            float target_dt = clamp(path_len / 48.0, 0.20, 0.55);
+            int steps = clamp(int(ceil(path_len / target_dt)), 24, 56);
+            float dt = path_len / float(steps);
 
-        // Stable jitter using interleaved gradient noise
-        vec2 pixel = gl_FragCoord.xy;
-        float jitter = interleavedGradientNoise(pixel);
-        t += dt * jitter;
+            // Stable jitter using interleaved gradient noise
+            vec2 pixel = gl_FragCoord.xy;
+            float jitter = interleavedGradientNoise(pixel);
+            float t = t_start + dt * jitter;
 
-        // Ray march with early termination
-        float transmittance = 1.0;
+            float transmittance = 1.0;
 
-        for (int i = 0; i < 32; i++) {
-            if (t > t_end) break;
-            if (transmittance < 0.01) break;  // early termination
+            for (int i = 0; i < 56; i++) {
+                if (i >= steps || t > t_end || transmittance < 0.01) break;
 
-            vec3 p = ro + rd * t;
+                vec3 p_local = ro_local + rd_local * t;
+                float r = length(p_local.xz);
 
-            // Transform to galaxy local coordinates (undo galaxy rotation)
-            vec4 p_local = u_galaxyModel * vec4(p, 1.0);
+                // Quick rejection outside active dust envelope
+                if (r >= 0.65 && r <= 46.5 && abs(p_local.y) <= 1.8) {
+                    float dens = getDustDensity(p_local);
 
-            float dens = getDustDensity(p_local.xyz);
-
-            if (dens > 0.001) {
-                // Record front depth: first significant dust distance
-                if (front_depth < 0.0) {
-                    front_depth = t;
+                    if (dens > 0.001) {
+                        if (front_depth < 0.0) {
+                            front_depth = t;
+                        }
+                        optical_depth += dens * dt;
+                        transmittance = exp(-optical_depth * u_dustOpacity * u_dustWeight);
+                    }
                 }
-                optical_depth += dens * dt;
-                transmittance = exp(-optical_depth * u_dustOpacity * u_dustWeight);
-            }
 
-            t += dt;
+                t += dt;
+            }
         }
     }
 
     // Transmittance: exp(-optical_depth * opacity * weight)
     float final_transmittance = exp(-optical_depth * u_dustOpacity * u_dustWeight);
 
-    // Encode front depth as linear distance, -1 means no dust hit
-    // Normalize to a reasonable range for the float16 texture
+    // Encode front depth as linear distance, 0.0 means no dust hit
     float encoded_depth = (front_depth < 0.0) ? 0.0 : front_depth / 200.0;
 
     fragColor = vec4(final_transmittance, encoded_depth, 0.0, 1.0);

@@ -9,6 +9,7 @@ uniform float u_lodDetail;
 uniform float u_volumetricDetail;
 uniform float u_diskThickness;
 uniform float u_proceduralStarWeight;
+uniform float u_lodWeight;
 
 // Real camera basis from Python (position is in BH-local space)
 uniform vec3 u_cameraPosition;
@@ -67,7 +68,7 @@ vec3 get_stars(vec2 p) {
     vec2 id = floor(p * 90.0);
     vec2 f = fract(p * 90.0);
     float star = smoothstep(0.96, 1.0, hash(id));
-    star *= smoothstep(0.5, 0.1, length(f - 0.5));
+    star *= 1.0 - smoothstep(0.1, 0.5, length(f - 0.5));
     vec3 color = mix(vec3(0.6, 0.8, 1.0), vec3(1.0, 0.7, 0.4), hash(id + 1.0));
     return color * star * 4.0; 
 }
@@ -204,7 +205,7 @@ void main()
     if (hit_black_hole) {
         // Event horizon: pure black behind accumulated gas.
         // transmittance = 0 ensures NO background stars bleed through.
-        fragColor = vec4(accumulated_gas_color, 0.0);
+        fragColor = vec4(accumulated_gas_color * u_lodWeight, mix(1.0, 0.0, u_lodWeight));
     } else {
         // Procedural background stars (only when not fully covered by 3D stars)
         vec2 sky_uv = vec2(atan(v.z, v.x), asin(clamp(v.y, -1.0, 1.0)));
@@ -215,6 +216,6 @@ void main()
 
         // Output: emission in RGB, transmittance in alpha
         // The 3D star layer underneath will be multiplied by this transmittance
-        fragColor = vec4(final_color, transmittance);
+        fragColor = vec4(final_color * u_lodWeight, mix(1.0, transmittance, u_lodWeight));
     }
 }

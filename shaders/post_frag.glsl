@@ -77,7 +77,8 @@ void main() {
         float mapped_lum = ACESFilm(vec3(lum)).r;
         vec3 per_channel = ACESFilm(hdr);
         vec3 lum_scaled = hdr * (mapped_lum / lum);
-        hdr = mix(per_channel, lum_scaled, 0.45);
+        // Prioritize luminance-scaled tone mapping to preserve authentic spectral colors
+        hdr = mix(per_channel, lum_scaled, 0.75);
 
         // 5. Subtle Astrophotographical Color Grading (inspired by reference targets):
         // Warm golden core and bar (Ref 1 & Ref 2)

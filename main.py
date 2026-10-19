@@ -14,6 +14,7 @@ from galaxy import GalacticBulge, GalacticBar
 from galactic_disk import GalacticDisk
 from nebula import NebulaManager
 from galactic_map import GalacticMap
+from far_galaxy import FarGalaxy
 
 class MilkyWaySimulation(mglw.WindowConfig):
 
@@ -38,6 +39,7 @@ class MilkyWaySimulation(mglw.WindowConfig):
         self.nebula_mgr  = NebulaManager()
         self.galactic_disk = GalacticDisk(self.ctx, Path(__file__).parent, nebula_stars=self.nebula_mgr.get_stars_array())
         self.galactic_map  = GalacticMap(self.ctx, Path(__file__).parent)
+        self.far_galaxy    = FarGalaxy(self.ctx, Path(__file__).parent, nebula_mgr=self.nebula_mgr, disk=self.galactic_disk, bar=self.bar, bulge=self.bulge)
         
         # ==========================================================
         # Differential Galactic Rotation & Simulation Clock
@@ -305,6 +307,9 @@ class MilkyWaySimulation(mglw.WindowConfig):
             color_attachments=[self.scene_tex],
             depth_attachment=self.depth_tex
         )
+        self.depth_fbo = self.ctx.framebuffer(
+            depth_attachment=self.depth_tex
+        )
 
         # Quarter-resolution FBO for dust pass
         # 2 components (RG16F): R = transmittance, G = front dust depth
@@ -352,6 +357,7 @@ class MilkyWaySimulation(mglw.WindowConfig):
     def on_resize(self, width: int, height: int):
 
         self.scene_tex.release()
+        self.depth_fbo.release()
         self.depth_tex.release()
         self.fbo.release()
         self.dust_tex.release()
@@ -530,8 +536,9 @@ class MilkyWaySimulation(mglw.WindowConfig):
         # LOD
         # ----------------------------------------------------------
 
+        dist = self.camera.absolute_distance
         lod_state = self.lod_manager.get_state(
-            self.camera.absolute_distance
+            dist
         )
 
 
@@ -576,9 +583,10 @@ class MilkyWaySimulation(mglw.WindowConfig):
         # Use standard additive blending for 3D stars
         self.ctx.blend_func = (self.ctx.SRC_ALPHA, self.ctx.ONE)
 
-        # Calculate black hole screen position (0,0,0) in NDC
-        vp_matrix = self.camera.get_projection_matrix(bh.aspect_ratio) * self.camera.get_view_matrix()
-        bh_clip = vp_matrix * glm.vec4(0.0, 0.0, 0.0, 1.0)
+        # Calculate black hole screen position (0,0,0) in NDC and compute view-projection matrix
+        vp = self.camera.get_projection_matrix(bh.aspect_ratio) * self.camera.get_view_matrix()
+        vp_matrix = vp
+        bh_clip = vp * glm.vec4(0.0, 0.0, 0.0, 1.0)
         if bh_clip.w > 0.0:
             bh_screen_pos = (bh_clip.x / bh_clip.w, bh_clip.y / bh_clip.w)
         else:
@@ -702,71 +710,104 @@ class MilkyWaySimulation(mglw.WindowConfig):
         if "u_cameraUp" in self.billboard_program:
             self.billboard_program["u_cameraUp"].value = cam_up
 
-        # Render Galactic Disk first, then Bulge
-        # Fade out 3D stars when very close to avoid stacking over procedural stars
-        star_visibility = 1.0 
-        base_visibility = 1.0 - lod_state["near_weight"]
-        star_visibility = base_visibility
+        # ----------------------------------------------------------
+        # Component and LOD visibility
+        # ----------------------------------------------------------
+        star_visibility = lod_state["star_visibility"]
+        bulge_visibility = lod_state["bulge_visibility"]
+        galaxy_far_weight = lod_state["galaxy_far_weight"]
+
+        # ----------------------------------------------------------
+        # PASS 1A: Scene Depth Pass (for Dust and Nebulae Occlusion)
+        # Separates depth information from additive stellar accumulation
+        # so overlapping stars never depend on draw order.
+        # ----------------------------------------------------------
+        self.depth_fbo.use()
+        self.ctx.clear(depth=1.0)
+        self.ctx.enable(self.ctx.DEPTH_TEST)
+        self.ctx.depth_mask = True
+
+        if star_visibility > 0.001:
+            self.galactic_disk.render(
+                self.camera, 
+                bh.aspect_ratio, 
+                1.0, 
+                self.galaxy_rotation_angle,
+                sim_time=self.sim_time
+            )
+            self.bar.render(
+                self.camera, 
+                bh.aspect_ratio, 
+                1.0, 
+                self.galaxy_rotation_angle,
+                sim_time=self.sim_time
+            )
+            self.bulge.render(
+                self.camera, 
+                bh.aspect_ratio, 
+                1.0, 
+                self.galaxy_rotation_angle,
+                sim_time=self.sim_time
+            )
+
+        if galaxy_far_weight > 0.001:
+            self.far_galaxy.render_depth(
+                self.camera,
+                bh.aspect_ratio,
+                self.galaxy_rotation_angle
+            )
+
+        # ----------------------------------------------------------
+        # PASS 1B: Stellar & Far Galaxy Color Accumulation
+        # Additive blending with depth testing disabled: NO star is ever
+        # discarded, and overlapping stars never depend on draw order.
+        # ----------------------------------------------------------
+        self.fbo.use()
+        self.ctx.clear(0.0, 0.0, 0.0, 1.0) # Color clear; depth preserved from Pass 1A
+        self.ctx.disable(self.ctx.DEPTH_TEST)
+        self.ctx.depth_mask = False
         
-        # LOCAL FIX: Restore 3D moving stars in the near region
-        # Ensures they don't abruptly appear or disappear by blending from 2.0 to 11.0
-        dist = self.camera.absolute_distance
-        if dist < 11.0:
-            def smoothstep_py(e0, e1, x):
-                t = max(0.0, min(1.0, (x - e0) / (e1 - e0)))
-                return t * t * (3.0 - 2.0 * t)
-                
-            # Get the exact base visibility that will be active at distance 11.0
-            # to ensure a mathematically perfect, seamless merge.
-            base_at_11 = 1.0 - self.lod_manager.get_state(11.0)["near_weight"]
-            
-            if dist < 4.0:
-                # Ramp up: 0.0 at dist 2.0 -> ~0.125 at dist 3.0 -> 0.25 at dist 4.0
-                t = smoothstep_py(2.0, 4.0, dist)
-                local_vis = t * 0.25
-            elif dist < 8.0:
-                # Moderate to Strong: 0.25 at dist 4.0 -> ~0.40 at dist 6.0 -> 0.55 at dist 8.0
-                t = smoothstep_py(4.0, 8.0, dist)
-                local_vis = 0.25 * (1.0 - t) + 0.55 * t
-            else:
-                # Merge up to normal transition: 0.55 at dist 8.0 -> base_at_11 at dist 11.0
-                t = smoothstep_py(8.0, 11.0, dist)
-                local_vis = 0.55 * (1.0 - t) + base_at_11 * t
-                
-            star_visibility = local_vis
+        # Additive blending for 3D stars
+        self.ctx.blend_func = (self.ctx.SRC_ALPHA, self.ctx.ONE)
         
-        self.galactic_disk.render(
-            self.camera, 
-            bh.aspect_ratio, 
-            star_visibility, 
-            self.galaxy_rotation_angle,
-            sim_time=self.sim_time
-        )
-        self.bar.render(
-            self.camera, 
-            bh.aspect_ratio, 
-            star_visibility, 
-            self.galaxy_rotation_angle,
-            sim_time=self.sim_time
-        )
-        self.bulge.render(
-            self.camera, 
-            bh.aspect_ratio, 
-            star_visibility, 
-            self.galaxy_rotation_angle,
-            sim_time=self.sim_time
-        )
+        if star_visibility > 0.001:
+            self.galactic_disk.render(
+                self.camera, 
+                bh.aspect_ratio, 
+                star_visibility, 
+                self.galaxy_rotation_angle,
+                sim_time=self.sim_time
+            )
+            self.bar.render(
+                self.camera, 
+                bh.aspect_ratio, 
+                star_visibility, 
+                self.galaxy_rotation_angle,
+                sim_time=self.sim_time
+            )
+            self.bulge.render(
+                self.camera, 
+                bh.aspect_ratio, 
+                bulge_visibility, 
+                self.galaxy_rotation_angle,
+                sim_time=self.sim_time
+            )
+
+        # Far Galaxy LOD representation on the galactic plane
+        if galaxy_far_weight > 0.001:
+            self.far_galaxy.render(
+                self.camera,
+                bh.aspect_ratio,
+                galaxy_far_weight,
+                self.galaxy_rotation_angle
+            )
 
         # ----------------------------------------------------------
         # Post-process passes (Black hole raymarcher)
         # ----------------------------------------------------------
-        # Disable depth test for BH — it renders as fullscreen quads.
-        # depth_mask=False prevents BH quads from overwriting star depths
-        # that the dust compositor needs.
+        # Composite mode: StarColor * Transmittance + GasColor * 1.0
         self.ctx.disable(self.ctx.DEPTH_TEST)
         self.ctx.depth_mask = False
-        
-        # Composite mode: StarColor * Transmittance + GasColor * 1.0
         self.ctx.blend_func = (self.ctx.ONE, self.ctx.SRC_ALPHA)
         
         self.renderer.render(lod_state)
@@ -793,6 +834,7 @@ class MilkyWaySimulation(mglw.WindowConfig):
             else:
                 t = max(0.0, min(1.0, (dist - 30.0) / 20.0))
                 dust_weight = 0.9 + t * t * (3.0 - 2.0 * t) * 0.1
+        dust_weight *= (1.0 - galaxy_far_weight)
         
         self.dust_fbo.use()
         self.ctx.clear(1.0, 0.0, 0.0, 1.0) # R=1.0 (full transmittance), G=0.0 (no dust depth)
@@ -840,6 +882,7 @@ class MilkyWaySimulation(mglw.WindowConfig):
                 nebula_weight = 0.3 + t * t * (3.0 - 2.0 * t) * 0.7
             else:
                 nebula_weight = 1.0
+        nebula_weight *= (1.0 - galaxy_far_weight)
                 
         self.nebula_fbo.use()
         # Clear: A=1.0 (transmittance), Depth=0.0
@@ -890,6 +933,12 @@ class MilkyWaySimulation(mglw.WindowConfig):
             self.comp_program["u_nearPlane"].value = 0.01
         if "u_farPlane" in self.comp_program:
             self.comp_program["u_farPlane"].value = 10000.0
+        if "u_camPos" in self.comp_program:
+            self.comp_program["u_camPos"].value = self.camera.get_position()
+        if "u_camForward" in self.comp_program:
+            self.comp_program["u_camForward"].value = self.camera.get_forward()
+        if "u_invVP" in self.comp_program:
+            self.comp_program["u_invVP"].write(glm.inverse(vp))
         self.comp_vao.render(mode=self.ctx.TRIANGLE_STRIP)
 
         # ----------------------------------------------------------
@@ -907,8 +956,8 @@ class MilkyWaySimulation(mglw.WindowConfig):
         self.ctx.disable(self.ctx.BLEND)
         self.comp_tex.use(location=0)
         self.extract_program["u_image"].value = 0
-        self.extract_program["u_threshold"].value = 0.28
-        self.extract_program["u_knee"].value = 0.22
+        self.extract_program["u_threshold"].value = 0.85
+        self.extract_program["u_knee"].value = 0.25
         self.extract_vao.render(mode=self.ctx.TRIANGLE_STRIP)
 
         # 2.2: Tight Bloom Blur (half res)
@@ -971,9 +1020,9 @@ class MilkyWaySimulation(mglw.WindowConfig):
         self.post_program["u_scene"].value = 0
         self.post_program["u_bloomTight"].value = 1
         self.post_program["u_bloomBroad"].value = 2
-        self.post_program["u_exposure"].value = 1.15
-        self.post_program["u_bloomTightIntensity"].value = 0.60
-        self.post_program["u_bloomBroadIntensity"].value = 0.40
+        self.post_program["u_exposure"].value = 1.05
+        self.post_program["u_bloomTightIntensity"].value = 0.35
+        self.post_program["u_bloomBroadIntensity"].value = 0.18
         self.post_program["u_dustProtection"].value = 0.88
         if "u_debugPost" in self.post_program:
             self.post_program["u_debugPost"].value = self.debug_post_mode
