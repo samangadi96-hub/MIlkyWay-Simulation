@@ -10,14 +10,16 @@ class GalacticDisk:
     Stellar disk of the Milky Way simulation with time-dependent, radius-dependent
     differential galactic rotation and persistent Lin-Shu density wave kinematics.
     
-    Individual stars orbit with differential angular velocity:
-        omega(r) = v_flat / sqrt(r*r + r_core*r_core)
-    approaching flat tangential velocity v_flat at large radii.
-    
-    The central bar and large-scale 4-arm spiral density wave rotate coherently at
-    pattern speed Omega_p (corotation near the bar tips r ~ 7.5).
-    Stars drift continuously relative to the spiral pattern without winding up or
-    blurring into concentric rings.
+    Architectural separation of density wave and stellar orbital motion:
+    - Exactly FOUR dominant, recognizable major spiral arms (Scutum-Centaurus,
+      Sagittarius, Perseus, Norma) maintained stably across all simulation times.
+    - Pattern frame rotates coherently at pattern speed Omega_p.
+    - Arm-tracing population (young stars, OB associations, clumpy spine) remains
+      concentrated in the persistent density wave without indefinite winding.
+    - Diffuse older stellar population exhibits genuine differential orbital motion:
+          omega(r) = v_flat / sqrt(r*r + r_core*r_core)
+      drifting continuously through and between the spiral arms while reinforcing
+      the density wave through gentle Lin-Shu epicyclic compression.
     """
 
     def __init__(self, ctx, base_dir, nebula_stars=None, seed=42, diagnostic_mode=False):
@@ -41,7 +43,7 @@ class GalacticDisk:
         # In-plane bar orientation in polar coordinates (matches GalacticBar 28 deg tilt)
         self.bar_angle_polar = math.pi / 2.0 - 0.488  # ~ 1.0828 rad
         self.arm_base_offset = self.bar_angle_polar - self.spiral_tightness * math.log(7.0 / self.inner_arm_radius)
-        self.compression = 0.22
+        self.compression = 0.08  # Gentle, physically consistent Lin-Shu wave compression (sub-caustic)
 
         # Load dedicated disk shaders supporting GPU differential rotation
         with open(self.base_dir / "shaders" / "disk_vert.glsl", encoding="utf-8") as f:
@@ -63,10 +65,12 @@ class GalacticDisk:
         # ==========================================================
         # 1. Dual-Component Stellar Disk (Structured Arms + Diffuse Disc)
         # ==========================================================
-        # 68% Arm stars concentrated along the 4 spiral arms
-        # 32% Diffuse inter-arm background stars
-        n_arm = int(self.num_stars * 0.68)
-        n_diffuse = self.num_stars - n_arm
+        # 68% Arm stars concentrated along the 4 spiral arms (young OB & star-forming tracers)
+        # 32% Diffuse inter-arm background stars (older population exhibiting differential orbits)
+        self.n_arm = int(self.num_stars * 0.68)
+        self.n_diffuse = self.num_stars - self.n_arm
+        n_arm = self.n_arm
+        n_diffuse = self.n_diffuse
 
         # --- A. Arm Population (Structured, Clumpy, Layered) ---
         # Sample radii with exponential disc falloff
@@ -95,9 +99,10 @@ class GalacticDisk:
         ideal_theta_arm = arm_base_angles + arm_spine_arm
 
         # Along-arm density wave modulation (star-forming knots, clumps & gaps):
+        # Controlled amplitude prevents duplicate-track splitting while preserving authentic clumps
         s_norm = (r_arm - self.inner_arm_radius) / (self.outer_radius - self.inner_arm_radius)
         phi_arm = arm_indices * 1.5708
-        knot_offset = 0.15 * np.sin(2.0 * math.pi * 3.2 * s_norm + phi_arm) + 0.08 * np.sin(2.0 * math.pi * 6.5 * s_norm)
+        knot_offset = 0.12 * np.sin(2.0 * math.pi * 3.2 * s_norm + phi_arm) + 0.06 * np.sin(2.0 * math.pi * 6.5 * s_norm)
 
         # Azimuthal Gaussian width: two-tier astrophysical arm structure
         # Tier 1 (55%): dense star-forming spine, knots and bright clusters
@@ -113,7 +118,7 @@ class GalacticDisk:
         thickness_arm = 0.12 + 0.14 * (r_arm / self.outer_radius)
         y_arm = rng.normal(0.0, thickness_arm, size=n_arm)
 
-        # --- B. Diffuse Inter-Arm Population (Background Glow) ---
+        # --- B. Diffuse Inter-Arm Population (Background Glow & Orbiting Disc) ---
         r_diff = rng.gamma(shape=2.0, scale=self.disk_scale, size=int(n_diffuse * 1.35))
         r_diff = r_diff[(r_diff >= self.inner_arm_radius) & (r_diff <= self.outer_radius)]
         fade_diff = 1.0 - smoothstep_np(38.0, 46.0, r_diff)
@@ -125,26 +130,11 @@ class GalacticDisk:
             r_diff = np.concatenate((r_diff, extra[rng.random(len(extra)) < fade]))
         r_diff = r_diff[:n_diffuse]
 
+        # Guiding centers are strictly uniform across [0, 2*pi) so differential rotation
+        # leaves the underlying background distribution completely stationary and free
+        # of winding tracks or caustic spiral rings over all simulation times.
+        # Bar resonance cavity attenuation is dynamically applied in the pattern frame in the shader.
         theta_diff = rng.uniform(0.0, 2.0 * math.pi, size=n_diffuse)
-        
-        # Inter-bar resonance cavity depletion inside r < 7.5 to keep 3D bar prominent
-        minor_axis_prox = np.abs(np.sin(theta_diff - self.bar_angle_polar))
-        depletion = np.where(r_diff < 7.5, (1.0 - smoothstep_np(3.0, 7.5, r_diff)) * (0.85 * minor_axis_prox), 0.0)
-        rejected = rng.random(n_diffuse) < depletion
-        attempts = 0
-        while np.any(rejected) and attempts < 10:
-            n_rej = np.sum(rejected)
-            new_th = rng.uniform(0.0, 2.0 * math.pi, size=n_rej)
-            new_prox = np.abs(np.sin(new_th - self.bar_angle_polar))
-            new_dep = np.where(r_diff[rejected] < 7.5, (1.0 - smoothstep_np(3.0, 7.5, r_diff[rejected])) * (0.85 * new_prox), 0.0)
-            acc = rng.random(n_rej) >= new_dep
-            if np.any(acc):
-                sub_indices = np.where(rejected)[0][acc]
-                theta_diff[sub_indices] = new_th[acc]
-            curr_prox = np.abs(np.sin(theta_diff - self.bar_angle_polar))
-            curr_dep = np.where(r_diff < 7.5, (1.0 - smoothstep_np(3.0, 7.5, r_diff)) * (0.85 * curr_prox), 0.0)
-            rejected = rng.random(n_diffuse) < curr_dep
-            attempts += 1
 
         # Diffuse disk thickness: thicker older population with radial flare
         thickness_diff = 0.25 + 0.30 * (r_diff / self.outer_radius)
@@ -236,10 +226,25 @@ class GalacticDisk:
             self.program["u_armOffset"].value = self.arm_base_offset
         if "u_innerArmR" in self.program:
             self.program["u_innerArmR"].value = self.inner_arm_radius
+        if "u_barAnglePolar" in self.program:
+            self.program["u_barAnglePolar"].value = self.bar_angle_polar
+
+        # 1. Arm-tracer population: coherent density-wave pattern frame
+        # Stars maintain persistent 4-arm structure, asymmetry, and clumpy spine without winding
+        if "u_driftScale" in self.program:
+            self.program["u_driftScale"].value = 0.0
+        if "u_compression" in self.program:
+            self.program["u_compression"].value = 0.0
+        self.vao.render(moderngl.POINTS, vertices=self.n_arm, first=0)
+
+        # 2. Diffuse orbiting population: differential rotation through density wave
+        # Stars orbit with radius-dependent angular velocity omega(r), compressing into
+        # the wave as they pass through, without shearing the large-scale pattern
+        if "u_driftScale" in self.program:
+            self.program["u_driftScale"].value = 1.0
         if "u_compression" in self.program:
             self.program["u_compression"].value = self.compression
-
-        self.vao.render(moderngl.POINTS)
+        self.vao.render(moderngl.POINTS, vertices=self.n_diffuse, first=self.n_arm)
 
         # Render nebula-associated stars with coherent pattern speed
         if self.nebula_vao is not None:

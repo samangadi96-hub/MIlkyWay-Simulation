@@ -20,6 +20,8 @@ uniform float u_armTightness;
 uniform float u_armOffset;
 uniform float u_innerArmR;
 uniform float u_compression;
+uniform float u_driftScale;
+uniform float u_barAnglePolar;
 
 const float PI = 3.14159265358979323846;
 const float TWO_PI = 6.28318530717958647692;
@@ -43,7 +45,11 @@ void main() {
     // Wrap to [-PI, PI] to avoid any floating-point precision loss over long runs.
     float delta_omega = omega - u_patternSpeed;
     float delta_theta_drift = mod(delta_omega * u_simTime + PI, TWO_PI) - PI;
-    float theta_rel = theta0 - delta_theta_drift;
+    
+    // Separate stellar orbital motion from arm pattern motion:
+    // For differentially orbiting stars (u_driftScale = 1.0), stars drift relative to the pattern.
+    // For arm-tracer stars (u_driftScale = 0.0), stars maintain their authentic star-forming alignment.
+    float theta_rel = theta0 - delta_theta_drift * u_driftScale;
     
     // Lin-Shu density wave epicyclic modulation in pattern frame:
     // Ideal 4-arm spiral spine angle at radius r
@@ -87,12 +93,21 @@ void main() {
     // Wave proximity factor for astrophysical luminosity enhancement
     // (young OB stars and emission peaks along density wave shock)
     float arm_prox = 0.5 + 0.5 * cos(psi_wrap);
-    float lum_boost = mix(0.85, 1.15, pow(arm_prox, 1.8) * r_mask);
+    float lum_boost = mix(0.88, 1.15, pow(arm_prox, 1.8) * r_mask);
     
     // Color modulation: subtle blue starburst enrichment in density wave shock
     vec3 star_color = in_color;
     vec3 shock_blue = vec3(0.85, 0.94, 1.05);
     star_color = mix(star_color, star_color * shock_blue, pow(arm_prox, 1.5) * 0.25 * r_mask);
     
-    v_color = star_color * in_brightness * u_visibility * subpixel_factor * lum_boost;
+    // Inter-bar resonance cavity in the bar pattern frame (r < 7.5):
+    // Smoothly attenuates diffuse stars along the bar minor axis in the rotating pattern frame,
+    // keeping the 3D bar prominent without frozen spatial rejections that shear into spiral grooves.
+    float cavity_att = 1.0;
+    if (u_driftScale > 0.5 && r < 7.5) {
+        float minor_axis_prox = abs(sin(theta_pat - u_barAnglePolar));
+        cavity_att = 1.0 - (1.0 - smoothstep(3.0, 7.5, r)) * (0.85 * minor_axis_prox);
+    }
+    
+    v_color = star_color * in_brightness * u_visibility * subpixel_factor * lum_boost * cavity_att;
 }

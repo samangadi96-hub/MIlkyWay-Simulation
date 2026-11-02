@@ -1,0 +1,33 @@
+* [33m2cc0530[m[33m ([m[1;31morigin/pavan[m[33m)[m Updated actual image
+* [33m2546aa1[m Improvised simulation
+* [33mcdfd96c[m Complete realistic Milky Way astronomical simulation upgrades: two-tier clumpy arms, authentic bar dust lanes, volumetric H-II nebulae, Planckian colors, and dual-profile PSF
+* [33m1a9b6f5[m Improved Visuals
+* [33m8f7e684[m better central  bulge
+* [33ma164421[m Implement time-dependent differential galactic rotation with Lin-Shu density wave preservation
+* [33m812bd62[m Fix central bar far-zoom visibility and add scientific galactic map overlay
+* [33me42ca02[m Added Bulge
+* [33m8435823[m[33m ([m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m Nebulas added
+* [33mc30ce05[m Modified Nebulas
+* [33m84d6de4[m Added Nebulas
+* [33mb66eecd[m Without Dust Lanes
+* [33mac99bb2[m Ignore virtual environment
+* [33m0b874e4[m Delete _fix_hud.zip
+* [33m8405f2b[m Delete shaders2.zip
+* [33m301ee3e[m Updated
+* [33m5d993f8[m Update current code
+* [33m946daf8[m updated mid part of simulation
+* [33mc6ed85d[m Implement 3D starfield, unified camera projection, and black hole compositing mask
+* [33mb821b9e[m Updated Far part of LOD
+* [33m963b27d[m updated
+* [33m9189310[m updated
+* [33ma2671c1[m updated
+* [33me2919fd[m Implement interactive mouse controls and fix moderngl event handlers
+* [33m48d7192[m LOD updation
+* [33ma7ed971[m Add zoom controls (Q/E) and fix zoom-out black hole disappearance
+* [33m2f4da16[m Updated Milky Way sim Code
+* [33mb8d149a[m Update Milky Way Simulation code
+* [33md84609a[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mpavan[m[33m, [m[1;32mmaster[m[33m)[m Updated the code
+* [33m7138d3c[m Added Einstein Ring
+* [33m1aa8eb2[m The Accretion Disk
+* [33mf612b3e[m Stage 3 & 4: Gradient photon ring and accretion disk
+* [33m104b314[m Initial project setup with ModernGL window and black hole rendering
