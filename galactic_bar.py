@@ -17,7 +17,7 @@ class GalacticBar:
     - Fully compatible with the existing star rendering pipeline and coordinate transforms.
     """
 
-    def __init__(self, ctx, base_dir, num_stars=600000, seed=42, diagnostic_mode=False):
+    def __init__(self, ctx, base_dir, num_stars=6000000, seed=42, diagnostic_mode=False):
         self.ctx = ctx
         self.num_stars = num_stars
         self.seed = seed

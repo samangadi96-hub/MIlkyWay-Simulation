@@ -548,10 +548,12 @@ class MilkyWaySimulation(mglw.WindowConfig):
         if not self.sim_paused:
             self.sim_time += frametime * self.sim_speed
 
-        # Safe wrapping of pattern rotation angle to [0, 2*pi)
-        self.galaxy_rotation_angle = math.fmod(self.pattern_speed * self.sim_time, 2.0 * math.pi)
-        if self.galaxy_rotation_angle < 0.0:
-            self.galaxy_rotation_angle += 2.0 * math.pi
+        # Reverse apparent galaxy rotation from anticlockwise to clockwise:
+        # signed_pattern_angle = -pattern_speed * sim_time
+        signed_pattern_angle = -self.pattern_speed * self.sim_time
+        self.galaxy_rotation_angle = math.fmod(signed_pattern_angle, 2.0 * math.pi)
+        if self.galaxy_rotation_angle > 0.0:
+            self.galaxy_rotation_angle -= 2.0 * math.pi
 
         sim_status = "PAUSED" if self.sim_paused else f"{self.sim_speed:.2f}x"
         print(
