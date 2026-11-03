@@ -185,45 +185,70 @@ def generate_stellar_population(
         sizes[mask_a] = np.where(is_giant_a, rng.uniform(0.055, 0.090, n_a), rng.uniform(0.026, 0.048, n_a))
         brightness[mask_a] = np.where(is_giant_a, rng.uniform(1.2, 1.7, n_a), rng.uniform(0.70, 1.10, n_a))
 
+    is_central = population_type in ('bulge', 'bar')
+
     # Class 3: F-type (T = 6,000 - 7,400 K) - Warm neutral white
     mask_f = classes == 3
     if np.any(mask_f):
         n_f = np.sum(mask_f)
         temps[mask_f] = rng.uniform(6000.0, 7400.0, n_f)
-        is_giant_f = evo_roll[mask_f] < 0.10
-        sizes[mask_f] = np.where(is_giant_f, rng.uniform(0.045, 0.075, n_f), rng.uniform(0.020, 0.038, n_f))
-        brightness[mask_f] = np.where(is_giant_f, rng.uniform(1.0, 1.45, n_f), rng.uniform(0.60, 0.90, n_f))
+        if is_central:
+            is_giant_f = evo_roll[mask_f] < 0.08
+            sizes[mask_f] = np.where(is_giant_f, rng.uniform(0.035, 0.060, n_f), rng.uniform(0.016, 0.028, n_f))
+            brightness[mask_f] = np.where(is_giant_f, rng.uniform(0.65, 1.05, n_f), rng.uniform(0.18, 0.38, n_f))
+        else:
+            is_giant_f = evo_roll[mask_f] < 0.10
+            sizes[mask_f] = np.where(is_giant_f, rng.uniform(0.045, 0.075, n_f), rng.uniform(0.020, 0.038, n_f))
+            brightness[mask_f] = np.where(is_giant_f, rng.uniform(1.0, 1.45, n_f), rng.uniform(0.60, 0.90, n_f))
 
     # Class 4: G-type (T = 5,200 - 5,950 K) - Pale solar yellow-white
     mask_g = classes == 4
     if np.any(mask_g):
         n_g = np.sum(mask_g)
         temps[mask_g] = rng.uniform(5200.0, 5950.0, n_g)
-        is_giant_g = evo_roll[mask_g] < 0.10
-        sizes[mask_g] = np.where(is_giant_g, rng.uniform(0.045, 0.075, n_g), rng.uniform(0.020, 0.036, n_g))
-        brightness[mask_g] = np.where(is_giant_g, rng.uniform(1.0, 1.45, n_g), rng.uniform(0.55, 0.85, n_g))
+        if is_central:
+            is_giant_g = evo_roll[mask_g] < 0.08
+            sizes[mask_g] = np.where(is_giant_g, rng.uniform(0.032, 0.055, n_g), rng.uniform(0.014, 0.025, n_g))
+            brightness[mask_g] = np.where(is_giant_g, rng.uniform(0.60, 1.00, n_g), rng.uniform(0.15, 0.32, n_g))
+        else:
+            is_giant_g = evo_roll[mask_g] < 0.10
+            sizes[mask_g] = np.where(is_giant_g, rng.uniform(0.045, 0.075, n_g), rng.uniform(0.020, 0.036, n_g))
+            brightness[mask_g] = np.where(is_giant_g, rng.uniform(1.0, 1.45, n_g), rng.uniform(0.55, 0.85, n_g))
 
     # Class 5: K-type (T = 3,800 - 5,100 K) - Warm golden yellow to orange
     mask_k = classes == 5
     if np.any(mask_k):
         n_k = np.sum(mask_k)
         temps[mask_k] = rng.uniform(3800.0, 5100.0, n_k)
-        is_giant_k = evo_roll[mask_k] < 0.14  # Red clump giants
-        sizes[mask_k] = np.where(is_giant_k, rng.uniform(0.052, 0.090, n_k), rng.uniform(0.018, 0.032, n_k))
-        brightness[mask_k] = np.where(is_giant_k, rng.uniform(1.05, 1.60, n_k), rng.uniform(0.50, 0.78, n_k))
+        if is_central:
+            is_giant_k = evo_roll[mask_k] < 0.10
+            is_rare_k = evo_roll[mask_k] < 0.01
+            b_dwarf = rng.uniform(0.10, 0.24, n_k)
+            b_giant = rng.uniform(0.75, 1.35, n_k)
+            b_rare = rng.uniform(1.80, 2.70, n_k)
+            s_dwarf = rng.uniform(0.012, 0.022, n_k)
+            s_giant = rng.uniform(0.036, 0.062, n_k)
+            s_rare = rng.uniform(0.070, 0.095, n_k)
+            brightness[mask_k] = np.where(is_rare_k, b_rare, np.where(is_giant_k, b_giant, b_dwarf))
+            sizes[mask_k] = np.where(is_rare_k, s_rare, np.where(is_giant_k, s_giant, s_dwarf))
+        else:
+            is_giant_k = evo_roll[mask_k] < 0.14
+            sizes[mask_k] = np.where(is_giant_k, rng.uniform(0.052, 0.090, n_k), rng.uniform(0.018, 0.032, n_k))
+            brightness[mask_k] = np.where(is_giant_k, rng.uniform(1.05, 1.60, n_k), rng.uniform(0.50, 0.78, n_k))
 
     # Class 6: M-type (T = 2,600 - 3,750 K) - Warm amber to orange-red (understated)
     mask_m = classes == 6
     if np.any(mask_m):
         n_m = np.sum(mask_m)
         temps[mask_m] = rng.uniform(2600.0, 3750.0, n_m)
-        is_giant_m = evo_roll[mask_m] < 0.08  # Asymptotic giant branch / red giants
-        sizes[mask_m] = np.where(is_giant_m, rng.uniform(0.048, 0.085, n_m), rng.uniform(0.014, 0.026, n_m))
-        brightness[mask_m] = np.where(is_giant_m, rng.uniform(0.95, 1.45, n_m), rng.uniform(0.35, 0.55, n_m))
-
-    # Core luminosity boost for bulge and central bar
-    if population_type in ('bulge', 'bar'):
-        brightness *= 1.25
+        if is_central:
+            is_giant_m = evo_roll[mask_m] < 0.05
+            sizes[mask_m] = np.where(is_giant_m, rng.uniform(0.038, 0.068, n_m), rng.uniform(0.010, 0.018, n_m))
+            brightness[mask_m] = np.where(is_giant_m, rng.uniform(0.70, 1.25, n_m), rng.uniform(0.06, 0.16, n_m))
+        else:
+            is_giant_m = evo_roll[mask_m] < 0.08
+            sizes[mask_m] = np.where(is_giant_m, rng.uniform(0.048, 0.085, n_m), rng.uniform(0.014, 0.026, n_m))
+            brightness[mask_m] = np.where(is_giant_m, rng.uniform(0.95, 1.45, n_m), rng.uniform(0.35, 0.55, n_m))
 
     # ==============================================================
     # 3. Derive Linear RGB Colors

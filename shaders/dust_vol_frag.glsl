@@ -132,11 +132,15 @@ float getDustDensity(vec3 p) {
 
     // ----------------------------------------------------------
     // 2. VERTICAL PROFILE
-    //    Thin Gaussian, height varies smoothly with radius
+    //    Physically motivated thin dust (73 pc scale height, h ~ 0.10)
+    //    and thicker diffuse dust (225 pc scale height, h ~ 0.32)
     // ----------------------------------------------------------
-    float scale_height = u_dustHeightScale * (0.22 + 0.18 * smoothstep(4.0, 28.0, r));
-    float y_norm = p.y / scale_height;
-    float vertical = exp(-0.5 * y_norm * y_norm);
+    float h_thin = u_dustHeightScale * (0.10 + 0.08 * smoothstep(4.0, 30.0, r));
+    float h_thick = u_dustHeightScale * (0.28 + 0.14 * smoothstep(4.0, 30.0, r));
+    float y2 = p.y * p.y;
+    float vert_thin = exp(-0.5 * y2 / (h_thin * h_thin + 1e-5));
+    float vert_thick = exp(-0.5 * y2 / (h_thick * h_thick + 1e-5));
+    float vertical = 0.72 * vert_thin + 0.28 * vert_thick;
 
     // ----------------------------------------------------------
     // 3. SPIRAL ARM & BAR ALIGNMENT
@@ -197,19 +201,19 @@ float getDustDensity(vec3 p) {
 
     // Large-scale: broad clouds and gaps across the galaxy
     float n_large = fbm3(warped * ns * 0.15);
-    // Threshold to create distinct cloud/gap regions
-    float cloud_mask = smoothstep(0.28, 0.55, n_large);
+    float cloud_mask = smoothstep(0.22, 0.65, n_large);
 
-    // Medium-scale: broken lanes, clumps
+    // Medium-scale: broken lanes, molecular cloud clumps
     float n_medium = fbm5(warped * ns * 0.5 + vec3(12.3, 4.5, 6.7));
-    // Create clumpy structure
-    float clumps = smoothstep(0.2, 0.6, n_medium);
+    float clumps = smoothstep(0.18, 0.62, n_medium);
 
     // Fine-scale: wisps and irregular boundaries
     float n_fine = fbm3(p * ns * 1.5 + vec3(7.1, 2.8, 5.3));
-    float wisps = 0.6 + 0.4 * n_fine;  // subtle edge variation
+    float wisps = 0.65 + 0.35 * n_fine;
 
-    float noise_combined = cloud_mask * clumps * wisps;
+    // Layered modulation preserves spatially connected filamentary lanes
+    // with irregular clumps and lower-density transparent windows
+    float noise_combined = mix(0.40, 1.25, clumps) * wisps * mix(0.45, 1.20, cloud_mask);
 
     // ----------------------------------------------------------
     // 5. COMBINE all factors

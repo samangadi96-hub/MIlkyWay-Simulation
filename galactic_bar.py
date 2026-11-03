@@ -17,7 +17,8 @@ class GalacticBar:
     - Fully compatible with the existing star rendering pipeline and coordinate transforms.
     """
 
-    def __init__(self, ctx, base_dir, num_stars=6000000, seed=42, diagnostic_mode=False):
+    def __init__(self, ctx, base_dir, num_stars=600000, bar_width_0=0.82, seed=42, diagnostic_mode=False):
+        self.bar_width_0 = bar_width_0
         self.ctx = ctx
         self.num_stars = num_stars
         self.seed = seed
@@ -43,8 +44,8 @@ class GalacticBar:
         # In-plane orientation angle: 28 degrees (~0.488 rad) relative to Sun-GC (Z) axis
         BAR_ANGLE_Z = 0.488
 
-        # Transverse in-plane semi-width at center (aspect ratio ~ 3.5 : 1)
-        BAR_WIDTH_0 = 1.02
+        # Transverse in-plane semi-width at center (reduced ~20% for realistic slender bar profile)
+        BAR_WIDTH_0 = self.bar_width_0
 
         # Vertical thickness base scale
         BAR_HEIGHT_BASE = 0.46
@@ -85,12 +86,12 @@ class GalacticBar:
         # ==========================================================
         # 2. Minor In-Plane Axis (v) Sampling
         # ==========================================================
-        # Elliptical spindle width: 3.5:1 aspect ratio, tapering towards tips
+        # Elliptical spindle width: realistic aspect ratio (~4.4 : 1), tapering smoothly towards tips
         u_norm = u_abs / BAR_LENGTH
-        width_profile = np.sqrt(np.maximum(0.12, 1.0 - 0.75 * (u_norm ** 2)))
-        # Inner spine is even tighter for core stars
+        width_profile = np.sqrt(np.maximum(0.06, 1.0 - 0.78 * (u_norm ** 2)))
+        # Inner spine is even tighter for core stars to concentrate density along longitudinal axis
         is_core_star = np.arange(self.num_stars) < n_core
-        v_scale = np.where(is_core_star, BAR_WIDTH_0 * 0.65, BAR_WIDTH_0) * width_profile
+        v_scale = np.where(is_core_star, BAR_WIDTH_0 * 0.60, BAR_WIDTH_0) * width_profile
         v = rng.normal(0.0, v_scale, size=self.num_stars)
 
         # Smooth pitch curvature at the tips: as the bar ends reach the inner arms,

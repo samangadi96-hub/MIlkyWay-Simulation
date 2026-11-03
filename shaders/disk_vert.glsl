@@ -86,7 +86,7 @@ void main() {
     // millions of background stars from accumulating excessive energy.
     float subpixel_factor = 1.0;
     if (proj_size < 1.0) {
-        subpixel_factor = clamp(pow(proj_size, 1.6), 0.002, 1.0);
+        subpixel_factor = clamp(proj_size * proj_size, 0.0005, 1.0);
     }
     gl_PointSize = clamp(proj_size, 1.0, 24.0);
     

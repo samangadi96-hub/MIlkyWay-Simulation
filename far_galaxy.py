@@ -128,7 +128,7 @@ class FarGalaxy:
                 if hasattr(_obj, 'program'): _obj.program.release()
 
         # Separate disk into arm and diffuse components
-        n_arm = int(len(d_disk) * 0.68)
+        n_arm = getattr(disk, "n_arm", int(len(d_disk) * 0.48))
         x_arm, z_arm = d_disk[:n_arm, 0], d_disk[:n_arm, 2]
         rgb_arm, lum_arm = d_disk[:n_arm, 3:6], d_disk[:n_arm, 7]
         r_arm_stars = np.sqrt(x_arm * x_arm + z_arm * z_arm)

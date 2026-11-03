@@ -22,10 +22,10 @@ class GalacticDisk:
       the density wave through gentle Lin-Shu epicyclic compression.
     """
 
-    def __init__(self, ctx, base_dir, nebula_stars=None, seed=42, diagnostic_mode=False):
+    def __init__(self, ctx, base_dir, num_stars=2000000, nebula_stars=None, seed=42, diagnostic_mode=False):
         self.ctx = ctx
         self.base_dir = Path(base_dir)
-        self.num_stars = 2000000
+        self.num_stars = num_stars
         self.seed = seed
         self.diagnostic_mode = diagnostic_mode
 
@@ -65,24 +65,24 @@ class GalacticDisk:
         # ==========================================================
         # 1. Dual-Component Stellar Disk (Structured Arms + Diffuse Disc)
         # ==========================================================
-        # 68% Arm stars concentrated along the 4 spiral arms (young OB & star-forming tracers)
-        # 32% Diffuse inter-arm background stars (older population exhibiting differential orbits)
-        self.n_arm = int(self.num_stars * 0.68)
+        # Continuous underlying disk + four major spiral-arm overdensities:
+        # 48% Arm stars concentrated along the 4 spiral arms (young OB & star-forming tracers)
+        # 52% Diffuse background disk stars (continuous disk covering inner galaxy through inter-arm space)
+        self.n_arm = int(self.num_stars * 0.48)
         self.n_diffuse = self.num_stars - self.n_arm
         n_arm = self.n_arm
         n_diffuse = self.n_diffuse
 
         # --- A. Arm Population (Structured, Clumpy, Layered) ---
-        # Sample radii with exponential disc falloff
-        r_arm = rng.gamma(shape=2.2, scale=self.disk_scale, size=int(n_arm * 1.35))
-        r_arm = r_arm[(r_arm >= self.inner_arm_radius) & (r_arm <= self.outer_radius)]
-        # Outer disk soft fade: reject stars past 38 with probability smoothstep(38, 46)
-        fade_prob = 1.0 - smoothstep_np(38.0, 46.0, r_arm)
+        # Sample radii proportional to P(R) ~ R * Sigma(R) (Gamma distribution shape=2.0)
+        r_arm = rng.gamma(shape=2.0, scale=7.5, size=int(n_arm * 1.35))
+        r_arm = r_arm[(r_arm >= 3.2) & (r_arm <= self.outer_radius)]
+        fade_prob = smoothstep_np(2.8, 4.2, r_arm) * (1.0 - smoothstep_np(38.0, 46.0, r_arm))
         r_arm = r_arm[rng.random(len(r_arm)) < fade_prob][:n_arm]
         while len(r_arm) < n_arm:
-            extra = rng.gamma(shape=2.2, scale=self.disk_scale, size=n_arm - len(r_arm))
-            extra = extra[(extra >= self.inner_arm_radius) & (extra <= self.outer_radius)]
-            fade = 1.0 - smoothstep_np(38.0, 46.0, extra)
+            extra = rng.gamma(shape=2.0, scale=7.5, size=n_arm - len(r_arm))
+            extra = extra[(extra >= 3.2) & (extra <= self.outer_radius)]
+            fade = smoothstep_np(2.8, 4.2, extra) * (1.0 - smoothstep_np(38.0, 46.0, extra))
             r_arm = np.concatenate((r_arm, extra[rng.random(len(extra)) < fade]))
         r_arm = r_arm[:n_arm]
 
@@ -118,27 +118,35 @@ class GalacticDisk:
         thickness_arm = 0.12 + 0.14 * (r_arm / self.outer_radius)
         y_arm = rng.normal(0.0, thickness_arm, size=n_arm)
 
-        # --- B. Diffuse Inter-Arm Population (Background Glow & Orbiting Disc) ---
-        r_diff = rng.gamma(shape=2.0, scale=self.disk_scale, size=int(n_diffuse * 1.35))
-        r_diff = r_diff[(r_diff >= self.inner_arm_radius) & (r_diff <= self.outer_radius)]
-        fade_diff = 1.0 - smoothstep_np(38.0, 46.0, r_diff)
+        # --- B. Diffuse Inter-Arm Population (Continuous Underlying Disc) ---
+        # Continuous stellar disk covering from inner transition (r ~ 1.2) through the main disk
+        # Sampled proportional to polar area element P(R) ~ R * Sigma(R) = R * exp(-R / R_d)
+        r_diff = rng.gamma(shape=2.0, scale=6.8, size=int(n_diffuse * 1.35))
+        r_diff = r_diff[(r_diff >= 1.2) & (r_diff <= self.outer_radius)]
+        fade_diff = smoothstep_np(1.0, 2.5, r_diff) * (1.0 - smoothstep_np(38.0, 46.0, r_diff))
         r_diff = r_diff[rng.random(len(r_diff)) < fade_diff][:n_diffuse]
         while len(r_diff) < n_diffuse:
-            extra = rng.gamma(shape=2.0, scale=self.disk_scale, size=n_diffuse - len(r_diff))
-            extra = extra[(extra >= self.inner_arm_radius) & (extra <= self.outer_radius)]
-            fade = 1.0 - smoothstep_np(38.0, 46.0, extra)
+            extra = rng.gamma(shape=2.0, scale=6.8, size=n_diffuse - len(r_diff))
+            extra = extra[(extra >= 1.2) & (extra <= self.outer_radius)]
+            fade = smoothstep_np(1.0, 2.5, extra) * (1.0 - smoothstep_np(38.0, 46.0, extra))
             r_diff = np.concatenate((r_diff, extra[rng.random(len(extra)) < fade]))
         r_diff = r_diff[:n_diffuse]
 
         # Guiding centers are strictly uniform across [0, 2*pi) so differential rotation
         # leaves the underlying background distribution completely stationary and free
         # of winding tracks or caustic spiral rings over all simulation times.
-        # Bar resonance cavity attenuation is dynamically applied in the pattern frame in the shader.
         theta_diff = rng.uniform(0.0, 2.0 * math.pi, size=n_diffuse)
 
-        # Diffuse disk thickness: thicker older population with radial flare
-        thickness_diff = 0.25 + 0.30 * (r_diff / self.outer_radius)
-        y_diff = rng.normal(0.0, thickness_diff, size=n_diffuse)
+        # Diffuse disk vertical distribution: physically motivated thin-disk (~280 pc) and thick-disk (~800 pc)
+        # Using model conversion 1 unit ~ 700 pc: h_thin ~ 0.40, h_thick ~ 1.14
+        # Isothermal sech^2(z / z0) equilibrium profile
+        is_thick = rng.random(n_diffuse) < 0.25
+        h_thin = 0.35 + 0.20 * (r_diff / self.outer_radius)
+        h_thick = 0.85 + 0.35 * (r_diff / self.outer_radius)
+        scale_h = np.where(is_thick, h_thick, h_thin)
+
+        u_samp = np.clip(rng.uniform(0.005, 0.995, size=n_diffuse), 0.005, 0.995)
+        y_diff = scale_h * 0.5 * np.log((1.0 + (2.0 * u_samp - 1.0)) / (1.0 - (2.0 * u_samp - 1.0) + 1e-7))
 
         # Combine components
         radius = np.concatenate((r_arm, r_diff)).astype('f4')
@@ -150,7 +158,8 @@ class GalacticDisk:
         positions = np.column_stack((x, y, z)).astype('f4')
 
         # 4. Continuous Arm-Proximity & Astrophysical Stellar Population
-        arm_spine_total = self.arm_base_offset + self.spiral_tightness * np.log(radius / self.inner_arm_radius)
+        r_spine = np.maximum(radius, self.inner_arm_radius)
+        arm_spine_total = self.arm_base_offset + self.spiral_tightness * np.log(r_spine / self.inner_arm_radius)
         psi = 4.0 * (theta - arm_spine_total)
         psi_wrap = (psi + math.pi) % (2.0 * math.pi) - math.pi
         arm_factor = 0.5 + 0.5 * np.cos(psi_wrap)

@@ -78,38 +78,49 @@ void main() {
         nebDepthFactor = smoothstep(nebFrontDepth - n_transitionWidth, nebFrontDepth + n_transitionWidth * 0.3, sceneRayDistance);
     }
     
-    float eff_dust_trans = mix(1.0, dust_trans, dustDepthFactor);
+    // Cardelli, Clayton & Mathis (CCM 1989) astrophysical interstellar extinction law:
+    // Wavelength-dependent optical depth produces natural reddening of background starlight:
+    // Red transmits most (tau ~ 0.75), Green nominal (tau ~ 1.00), Blue absorbed most (tau ~ 1.35)
+    float t_v = clamp(dust_trans, 0.001, 1.0);
+    vec3 ccm_trans = vec3(
+        pow(t_v, 0.75),
+        pow(t_v, 1.00),
+        pow(t_v, 1.35)
+    );
+
+    // Depth-aware starlight extinction:
+    // Starlight passing through the dust is attenuated and reddened.
+    // If an individual foreground star is closer than the dust layer,
+    // it preserves its pinpoint brightness in front of the dark lane,
+    // while the dust lane STILL attenuates the background disk.
+    vec3 extinct_scene = scene.rgb * ccm_trans;
+    float fore_factor = 0.0;
+    if (has_dust && sceneRayDistance < dustFrontDepth) {
+        fore_factor = clamp((dustFrontDepth - sceneRayDistance) / (dustFrontDepth * 0.25 + 0.5), 0.0, 1.0);
+    }
+    vec3 comp_scene = mix(extinct_scene, scene.rgb, fore_factor * 0.75);
+
     float eff_neb_trans = mix(1.0, nebula_col.a, nebDepthFactor);
-    // Additive emission is not blocked by point stars (which are the only things writing to depth)
     vec3 eff_neb_emission = nebula_col.rgb;
-    
-    vec3 dustTint = mix(vec3(1.0), vec3(1.0, 0.97, 0.92), (1.0 - eff_dust_trans) * 0.5);
-    
-    // Compositing Order
+
     vec3 final_color = scene.rgb;
-    
+
     if (has_dust && has_nebula) {
-        // Both exist. Which is in front?
         if (dustFrontDepth < nebFrontDepth) {
-            // Dust is in front of Nebula
-            // 1. Composite Nebula onto Scene
-            final_color = final_color * eff_neb_trans + eff_neb_emission;
-            // 2. Composite Dust onto result
-            final_color = final_color * eff_dust_trans * dustTint;
+            // Dust is in front of Nebula: attenuate background nebula emission
+            vec3 extinct_neb = eff_neb_emission * ccm_trans;
+            final_color = comp_scene * eff_neb_trans + extinct_neb;
         } else {
             // Nebula is in front of Dust
-            // 1. Composite Dust onto Scene
-            final_color = final_color * eff_dust_trans * dustTint;
-            // 2. Composite Nebula onto result
-            final_color = final_color * eff_neb_trans + eff_neb_emission;
+            final_color = comp_scene * eff_neb_trans + eff_neb_emission;
         }
     } else if (has_nebula) {
-        final_color = final_color * eff_neb_trans + eff_neb_emission;
+        final_color = scene.rgb * eff_neb_trans + eff_neb_emission;
     } else if (has_dust) {
-        final_color = final_color * eff_dust_trans * dustTint;
+        final_color = comp_scene;
     }
 
     // Output composited HDR color in RGB, and effective dust transmittance in Alpha
     // (used by post-processing to protect dark dust silhouettes from bloom wash-out)
-    fragColor = vec4(final_color, eff_dust_trans);
+    fragColor = vec4(final_color, t_v);
 }
