@@ -37,23 +37,35 @@ class NebulaManager:
             r = rng.gamma(shape=4.0, scale=4.0) + MIN_R
             r = np.clip(r, MIN_R, MAX_R)
             
-            # Select arm with realistic asymmetry
-            arm_index = rng.choice([0, 1, 2, 3], p=[0.32, 0.18, 0.32, 0.18])
-            arm_base_angle = arm_index * (2 * np.pi / ARM_COUNT)
+            # Select arm with authentic Milky Way 4-arm asymmetry
+            # (Perseus & Scutum-Centaurus major; Sagittarius & Norma minor)
+            arm_index = rng.choice([0, 1, 2, 3], p=[0.31, 0.20, 0.30, 0.19])
+            arm_base_angle = arm_index * (2.0 * np.pi / ARM_COUNT)
             
-            # Ideal log spiral angle (aligned directly with the stellar arms)
+            # Ideal log spiral centerline angle (matching galactic_disk.py exactly)
             ideal_theta = arm_base_angle + ARM_BASE_OFFSET + SPIRAL_TIGHTNESS * np.log(r / INNER_RADIUS)
             
-            # Slight offset inside/outside the arm
-            theta_offset = rng.normal(0.0, 0.15)
-            theta = ideal_theta + theta_offset
+            # Physical perpendicular distance offset (1 unit ~ 700 pc):
+            # H-II star-forming complexes lie within the active star-forming envelope
+            # (100 - 280 pc, ~0.14 - 0.40 units), positioned slightly downstream of the
+            # inner-edge dust shock front along the gas compression ridge.
+            # Convert physical offset to angular offset via: delta_theta = perp_offset / r
+            for _ in range(10):
+                perp_offset = rng.normal(0.12, 0.12) # ~84 pc mean downstream offset, ~84 pc std
+                if abs(perp_offset) <= 0.38: # Enforce strict star-forming arm envelope (~266 pc)
+                    break
+            else:
+                perp_offset = np.clip(perp_offset, -0.38, 0.38)
+                
+            delta_theta = perp_offset / r
+            theta = ideal_theta + delta_theta
             
             # 3D Position
             x = r * np.cos(theta)
             z = r * np.sin(theta)
             
-            # Nebulae are very close to the galactic plane (thin disk)
-            y = rng.normal(0.0, 0.08)
+            # Nebulae are born in cold molecular gas in the ultra-thin disk (scale height ~ 50 pc ~ 0.07 units)
+            y = rng.normal(0.0, 0.07)
             
             # 2. Size and Type (Astrophysical H-II complexes: 100 - 350 pc)
             size_roll = rng.random()
