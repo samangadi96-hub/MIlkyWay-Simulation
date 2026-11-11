@@ -1,4 +1,5 @@
 import math
+import time as pytime
 from pathlib import Path
 
 import moderngl_window as mglw
@@ -69,6 +70,13 @@ class MilkyWaySimulation(mglw.WindowConfig):
         self.debug_nebula = False
         self.debug_post_mode = 0
 
+        # S-star mouse click selection & camera focus tracking state
+        self._lmb_down = False
+        self._lmb_drag_dist = 0.0
+        self._last_click_time = 0.0
+        self._last_click_star = None
+        self._follow_selected_star = False
+
         print()
         print('  Milky Way Simulation - Controls')
         print('  --------------------------------')
@@ -86,8 +94,12 @@ class MilkyWaySimulation(mglw.WindowConfig):
         print('  N                -> toggle nebula debug')
         print('  B                -> cycle post-processing debug views')
         print('  M                -> toggle scientific galactic map overlay')
-        print('  O                -> toggle Sgr A* S-star cluster & orbits')
-        print('  Y                -> toggle S-star identification labels & legend')
+        print('  O                -> toggle S-star orbital trajectories only')
+        print('  Y                -> toggle S-star identification badges only')
+        print('  H                -> toggle S-star HUD legend card')
+        print('  G                -> toggle synthetic tracer orbit paths')
+        print('  Left Click       -> select / deselect S-star (Dbl-Click: focus)')
+        print('  F / C            -> focus selected S-star / center Sgr A*')
         print('  --------------------------------')
         print()
 
@@ -395,6 +407,8 @@ class MilkyWaySimulation(mglw.WindowConfig):
     # ==============================================================
 
     def on_resize(self, width: int, height: int):
+        if width <= 0 or height <= 0:
+            return
 
         self.scene_tex.release()
         self.depth_fbo.release()
@@ -432,16 +446,97 @@ class MilkyWaySimulation(mglw.WindowConfig):
         self.blackhole.aspect_ratio = width / height
 
     # ==============================================================
-    # Mouse Controls
+    # Mouse Controls & Interactive S-Star Selection
     # ==============================================================
 
+    def _focus_selected_star(self):
+        sel_pos = self.s_stars.get_selected_position()
+        if sel_pos is None:
+            return
+        self._follow_selected_star = True
+        self.s_stars.set_focus_active(True)
+        self.camera.set_pan_target_smooth(sel_pos)
+        if self.camera.target_distance > 5.0:
+            self.camera.target_distance = 3.0
+
+    def _center_on_sgra(self):
+        self._follow_selected_star = False
+        self.s_stars.set_focus_active(False)
+        self.camera.return_to_center_smooth()
+
+    def _toggle_star_focus(self):
+        if self.s_stars.get_visibility(self.camera.absolute_distance) <= 0.02:
+            return
+        if self._follow_selected_star:
+            self._center_on_sgra()
+            print("\n[Sgr A*] Camera returned smoothly to Sagittarius A*")
+        else:
+            if self.s_stars.selected_idx is None:
+                self.s_stars.select_star(0)  # Default to S2 if none selected yet
+            info = self.s_stars.get_selected_info()
+            self._focus_selected_star()
+            if info is not None:
+                print(f"\n[Sgr A*] Camera focusing on {info['name']}")
+
+    def _handle_left_click(self, x: int, y: int):
+        if self.s_stars.get_visibility(self.camera.absolute_distance) <= 0.02:
+            return
+
+        hud_action = self.s_stars.handle_overlay_click(float(x), float(y))
+        if hud_action == "close":
+            self.s_stars.select_star(None)
+            if self._follow_selected_star:
+                self._center_on_sgra()
+            return
+        if hud_action == "focus":
+            self._toggle_star_focus()
+            return
+        if hud_action == "center":
+            self._center_on_sgra()
+            return
+        if hud_action == "consume":
+            return
+
+        hit_idx = self.s_stars.pick_star(
+            float(x), float(y),
+            self.camera,
+            self.blackhole.aspect_ratio,
+            self.wnd.size,
+        )
+        if hit_idx is not None:
+            now = pytime.perf_counter()
+            is_dbl = (self._last_click_star == hit_idx) and ((now - self._last_click_time) <= 0.38)
+            self._last_click_time = now
+            self._last_click_star = hit_idx
+            self.s_stars.select_star(hit_idx)
+            if is_dbl or self._follow_selected_star:
+                self._focus_selected_star()
+        else:
+            self.s_stars.select_star(None)
+            self._last_click_star = None
+            if self._follow_selected_star:
+                self._center_on_sgra()
+
     def on_mouse_press_event(self, x: int, y: int, button: int):
+        if button == 1:
+            self._lmb_down = True
+            self._lmb_drag_dist = 0.0
+        elif button == 4 and self._follow_selected_star:
+            self._follow_selected_star = False
+            self.s_stars.set_focus_active(False)
         self.camera.on_mouse_press(x, y, button)
 
     def on_mouse_release_event(self, x: int, y: int, button: int):
         self.camera.on_mouse_release(x, y, button)
+        if button == 1:
+            was_click = self._lmb_down and (self._lmb_drag_dist <= 5.0)
+            self._lmb_down = False
+            if was_click:
+                self._handle_left_click(x, y)
 
     def on_mouse_drag_event(self, x: int, y: int, dx: int, dy: int):
+        if self._lmb_down:
+            self._lmb_drag_dist += math.hypot(dx, dy)
         self.camera.on_mouse_drag(x, y, dx, dy)
 
     def on_mouse_scroll_event(self, x_offset: float, y_offset: float):
@@ -474,6 +569,8 @@ class MilkyWaySimulation(mglw.WindowConfig):
                 self._zoom_out = True
 
             elif key == self.wnd.keys.R:
+                self._follow_selected_star = False
+                self.s_stars.set_focus_active(False)
                 self.camera.reset()
 
             elif key == self.wnd.keys.T:
@@ -499,14 +596,31 @@ class MilkyWaySimulation(mglw.WindowConfig):
                 print(f"\n[Map] Scientific Galactic Map Overlay: {status}")
 
             elif key == self.wnd.keys.O:
-                self.s_stars.show_cluster = not self.s_stars.show_cluster
-                status = "ON" if self.s_stars.show_cluster else "OFF"
-                print(f"\n[Sgr A*] S-Star Cluster & Orbits: {status}")
+                state = self.s_stars.toggle_orbits()
+                status = "ON" if state else "OFF"
+                print(f"\n[Sgr A*] S-Star Orbital Trajectories: {status} (Stars remain visible)")
 
             elif key == self.wnd.keys.Y:
-                self.s_stars.show_labels = not self.s_stars.show_labels
-                status = "ON" if self.s_stars.show_labels else "OFF"
-                print(f"\n[Sgr A*] S-Star Identification Overlay: {status}")
+                state = self.s_stars.toggle_labels()
+                status = "ON" if state else "OFF"
+                print(f"\n[Sgr A*] S-Star Name Badges: {status}")
+
+            elif key == self.wnd.keys.H:
+                state = self.s_stars.toggle_hud_card()
+                status = "ON" if state else "OFF"
+                print(f"\n[Sgr A*] S-Star HUD Legend Card: {status}")
+
+            elif key == self.wnd.keys.G:
+                state = self.s_stars.toggle_synthetic_orbits()
+                status = "ON" if state else "OFF"
+                print(f"\n[Sgr A*] Synthetic Tracer Orbits: {status}")
+
+            elif key == self.wnd.keys.F:
+                self._toggle_star_focus()
+
+            elif key == self.wnd.keys.C:
+                self._center_on_sgra()
+                print("\n[Sgr A*] Camera centered smoothly on Sagittarius A*")
 
             elif key == self.wnd.keys.SPACE:
                 self.sim_paused = not self.sim_paused
@@ -572,6 +686,28 @@ class MilkyWaySimulation(mglw.WindowConfig):
         if self._zoom_out:
             self.camera.zoom_out(frametime)
 
+        # Single elapsed simulation clock with pause/resume and speed control
+        if not self.sim_paused:
+            self.sim_time += frametime * self.sim_speed
+            self.s_star_years += frametime * self.s_star_time_scale * self.sim_speed
+
+        self.s_stars.set_clock_status(self.s_star_years, self.sim_speed, self.sim_paused)
+        self.s_stars.compute_positions(self.s_star_years)
+
+        if self._follow_selected_star:
+            if self.s_stars.get_visibility(self.camera.absolute_distance) <= 0.02:
+                self._follow_selected_star = False
+                self.s_stars.set_focus_active(False)
+                self.camera.return_to_center_smooth()
+            else:
+                sel_pos = self.s_stars.get_selected_position()
+                if sel_pos is not None:
+                    self.camera.set_pan_target_smooth(sel_pos)
+                else:
+                    self._follow_selected_star = False
+                    self.s_stars.set_focus_active(False)
+                    self.camera.return_to_center_smooth()
+
         self.camera.update(frametime)
 
         # ----------------------------------------------------------
@@ -589,6 +725,8 @@ class MilkyWaySimulation(mglw.WindowConfig):
             cam_pos[2] * BLACK_HOLE_LOCAL_SCALE,
         )
 
+        self.s_stars.update(self.s_star_years, cam_pos, dt=frametime, recompute_orbits=False)
+
 
         # ----------------------------------------------------------
         # LOD
@@ -601,13 +739,6 @@ class MilkyWaySimulation(mglw.WindowConfig):
 
 
         fps = 1.0 / max(frametime, 0.0001)
-
-        # Single elapsed simulation clock with pause/resume and speed control
-        if not self.sim_paused:
-            self.sim_time += frametime * self.sim_speed
-            self.s_star_years += frametime * self.s_star_time_scale * self.sim_speed
-
-        self.s_stars.update(self.s_star_years, cam_pos)
 
         # Reverse apparent galaxy rotation from anticlockwise to clockwise:
         # signed_pattern_angle = -pattern_speed * sim_time

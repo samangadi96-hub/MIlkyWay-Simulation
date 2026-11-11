@@ -68,6 +68,7 @@ class Camera:
         # Pan state — offset applied to the lookAt target
         # ------------------------------------------------------------------
         self._pan_target = glm.vec3(0.0, 0.0, 0.0)
+        self._focus_target = None  # optional glm.vec3 smooth pan easing goal
 
         # ------------------------------------------------------------------
         # Mouse drag state
@@ -149,6 +150,8 @@ class Camera:
             self._last_mouse_y = y
 
         if self._panning:
+            # Manual middle-drag pan takes immediate priority over auto-focus easing
+            self._focus_target = None
             # Pan in camera-space: move the lookAt target along right/up
             pan_scale = self.PAN_SENSITIVITY * self.distance
             self._pan_target += self._right * (-dx * pan_scale)
@@ -235,6 +238,14 @@ class Camera:
         self.azimuth     += (self.target_azimuth     - self.azimuth)     * t
         self.distance    += (self.target_distance    - self.distance)     * min(self.ZOOM_SMOOTH * dt, 1.0)
 
+        if self._focus_target is not None:
+            diff = self._focus_target - self._pan_target
+            self._pan_target += diff * t
+            if glm.length(diff) < 1e-4:
+                self._pan_target = glm.vec3(self._focus_target)
+                if self._focus_target == glm.vec3(0.0, 0.0, 0.0):
+                    self._focus_target = None
+
         # ------------------------------------------------------------------
         # Derived value used by the black-hole shader
         # ------------------------------------------------------------------
@@ -309,6 +320,18 @@ class Camera:
     def get_up(self):
         return (self._up.x, self._up.y, self._up.z)
 
+    def set_pan_target_smooth(self, target_pos):
+        """Smoothly ease the camera look-at target toward target_pos=(x, y, z)."""
+        self._focus_target = glm.vec3(float(target_pos[0]), float(target_pos[1]), float(target_pos[2]))
+
+    def clear_pan_target_smooth(self):
+        """Stop automatic smooth pan easing without moving the current camera target."""
+        self._focus_target = None
+
+    def return_to_center_smooth(self):
+        """Smoothly return the camera look-at target back to Sagittarius A* (0, 0, 0)."""
+        self._focus_target = glm.vec3(0.0, 0.0, 0.0)
+
     def reset(self):
         self.target_inclination = math.radians(75.0)
         self.target_azimuth = 0.0
@@ -316,3 +339,4 @@ class Camera:
         self._vel_azimuth = 0.0
         self._vel_inclination = 0.0
         self._pan_target = glm.vec3(0.0, 0.0, 0.0)
+        self._focus_target = None
