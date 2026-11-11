@@ -13,7 +13,7 @@ class GalacticBulge:
     the surrounding 3D GalacticBar without washing it out into a circular haze.
     """
 
-    def __init__(self, ctx, base_dir, num_stars=250000, seed=1337, diagnostic_mode=False):
+    def __init__(self, ctx, base_dir, num_stars=250000, seed=1337, diagnostic_mode=False, far_accumulator=None):
         self.ctx = ctx
         self.num_stars = num_stars
         self.seed = seed
@@ -82,7 +82,10 @@ class GalacticBulge:
         )
         
         star_data = np.column_stack((positions, colors, sizes, brightness)).astype('f4')
-        
+
+        if far_accumulator is not None:
+            far_accumulator.accumulate_bulge(positions, colors, brightness)
+
         self.vbo = self.ctx.buffer(star_data.tobytes())
         self.vao = self.ctx.vertex_array(
             self.program,

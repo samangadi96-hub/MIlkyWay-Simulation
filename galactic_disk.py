@@ -22,7 +22,7 @@ class GalacticDisk:
       the density wave through gentle Lin-Shu epicyclic compression.
     """
 
-    def __init__(self, ctx, base_dir, num_stars=2000000, nebula_stars=None, seed=42, diagnostic_mode=False):
+    def __init__(self, ctx, base_dir, num_stars=2000000, nebula_stars=None, seed=42, diagnostic_mode=False, far_accumulator=None):
         self.ctx = ctx
         self.base_dir = Path(base_dir)
         self.num_stars = num_stars
@@ -177,6 +177,9 @@ class GalacticDisk:
         )
 
         star_data = np.column_stack((positions, colors, sizes, brightness)).astype('f4')
+
+        if far_accumulator is not None:
+            far_accumulator.accumulate_disk(positions, colors, brightness, n_arm)
 
         self.vbo = self.ctx.buffer(star_data.tobytes())
         self.vao = self.ctx.vertex_array(

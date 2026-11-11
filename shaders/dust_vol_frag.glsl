@@ -1,235 +1,78 @@
 #version 330
 
 in vec2 v_uv;
-out vec4 fragColor;
+layout(location = 0) out vec4 fragDustTrans;   // RGB = CCM transmittance, A = encoded dust front depth
+layout(location = 1) out vec4 fragTauBins;     // Cumulative green-band optical depth across 4 ray bins
+layout(location = 2) out vec4 fragNebulaColor; // RGB = dust-coupled nebula + scattered glow, A = nebula transmittance
+layout(location = 3) out float fragNebulaDepth;// Normalized nebula front depth
 
 uniform vec3 u_camPos;
 uniform mat4 u_invVP;
 uniform mat4 u_galaxyModel; // inverse rotation of galaxy
 
 uniform float u_dustWeight;
+uniform float u_nebulaWeight;
+uniform float u_camDist;
 
-// Tunable params
+// ISM tunables (with backward-compatible uniform names preserved)
 uniform float u_dustOpacity;
 uniform float u_dustWidth;
 uniform float u_dustArmOffset;
 uniform float u_dustNoiseScale;
 uniform float u_dustDensity;
+uniform float u_dustHeightScale;
+uniform float u_dustLaneWidth;
+uniform float u_dustDiffuseWidth;
 
-// New params for upgraded dust
-uniform float u_dustHeightScale;   // vertical thickness control
-uniform float u_dustLaneWidth;     // narrow dense lane half-width
-uniform float u_dustDiffuseWidth;  // broader diffuse envelope half-width
-uniform float u_camDist;           // camera distance for LOD
+// Precomputed 3D ISM textures
+uniform sampler2D u_ismSpiralMap;  // R=thin_lane, G=thick_diff, B=mol_ridge, A=radial_mask
+uniform sampler3D u_molCloudTex;   // R=mol_env, G=mol_core, B=illum_warm, A=illum_cool
+uniform sampler3D u_noiseVol3D;    // R=fbm, G=ridged_filament, B=worley_clump, A=fine_wisp
+uniform int u_hasISMTextures;
+uniform int u_unifiedISM;
+
+// Nebula catalogue uniforms
+uniform int u_numNebulae;
+uniform vec4 u_nebulae_pos[150];
+uniform vec4 u_nebulae_col[150];
+
+const float PI = 3.14159265358979323846;
+const float TWO_PI = 6.28318530717958647692;
+const float SPIRAL_TIGHTNESS = 2.5;
+
+// Verified physical unit conversion: 1 simulation unit ~= 700 pc
+const float H_DUST_THIN_BASE  = 0.1157; // ~81 pc
+const float H_DUST_THICK_BASE = 0.2171; // ~152 pc
+const float SLAB_H = 0.72;              // Tight vertical dust + molecular gas slab (>6x thin scale height)
+const float CYL_R  = 47.2;
 
 // ============================================================
-// Hash and Noise — coherent 3D value noise with smooth interp
+// Interleaved gradient noise (temporally & spatially stable dither)
 // ============================================================
 
-float hash(vec3 p) {
-    p = fract(p * 0.3183099 + 0.1);
-    p *= 17.0;
-    return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
-}
-
-float noise(vec3 x) {
-    vec3 i = floor(x);
-    vec3 f = fract(x);
-    // Quintic interpolation for smoother derivatives
-    f = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
-    return mix(mix(mix(hash(i + vec3(0,0,0)), hash(i + vec3(1,0,0)), f.x),
-                   mix(hash(i + vec3(0,1,0)), hash(i + vec3(1,1,0)), f.x), f.y),
-               mix(mix(hash(i + vec3(0,0,1)), hash(i + vec3(1,0,1)), f.x),
-                   mix(hash(i + vec3(0,1,1)), hash(i + vec3(1,1,1)), f.x), f.y), f.z);
-}
-
-// 5-octave FBM with configurable lacunarity
-float fbm5(vec3 p) {
-    float f = 0.0;
-    float w = 0.5;
-    float totalW = 0.0;
-    for (int i = 0; i < 5; i++) {
-        f += w * noise(p);
-        totalW += w;
-        p *= 2.03;   // slight lacunarity variation avoids grid artifacts
-        w *= 0.48;
-    }
-    return f / totalW;
-}
-
-// 3-octave FBM for cheaper large-scale features
-float fbm3(vec3 p) {
-    float f = 0.0;
-    float w = 0.5;
-    float totalW = 0.0;
-    for (int i = 0; i < 3; i++) {
-        f += w * noise(p);
-        totalW += w;
-        p *= 2.07;
-        w *= 0.5;
-    }
-    return f / totalW;
-}
-
-// Interleaved gradient noise for temporally stable ray jitter
-// (no flickering unlike hash-based jitter)
 float interleavedGradientNoise(vec2 pixel) {
     return fract(52.9829189 * fract(0.06711056 * pixel.x + 0.00583715 * pixel.y));
 }
 
 // ============================================================
-// Slab intersection
+// Analytical Slab & Cylinder Intersections
 // ============================================================
 
 vec2 intersectSlab(vec3 ro, vec3 rd, float H) {
-    // Handle rays nearly parallel to the slab
     if (abs(rd.y) < 1e-6) {
         if (abs(ro.y) < H) return vec2(0.0, 200.0);
-        else return vec2(0.0, -1.0); // miss
+        return vec2(0.0, -1.0);
     }
     float t1 = (-H - ro.y) / rd.y;
     float t2 = (H - ro.y) / rd.y;
-    float tmin = min(t1, t2);
-    float tmax = max(t1, t2);
-    tmin = max(0.0, tmin);
-    return vec2(tmin, tmax);
+    return vec2(max(0.0, min(t1, t2)), max(t1, t2));
 }
-
-// ============================================================
-// Galaxy parameters — must match galactic_disk.py exactly
-// ============================================================
-
-const float PI = 3.14159265358979323846;
-const float TWO_PI = 6.28318530717958647692;
-const float INNER_ARM_R = 3.5;
-const float OUTER_RADIUS = 45.0;
-const float ARM_COUNT = 4.0;
-const float SPIRAL_TIGHTNESS = 2.5;
-// Arm base offset matches galactic_disk.py exactly: (PI/2 - 0.488) - 2.5 * ln(7.0 / 3.5)
-const float ARM_BASE_OFFSET = -0.650072;
-const float BAR_ANGLE = 0.488;
-
-// ============================================================
-// Dust density function — the core of the upgrade
-// ============================================================
-
-float getDustDensity(vec3 p) {
-    float r = length(p.xz);
-
-    // Hard cutoffs with smooth ramps (preserves clean black-hole event horizon)
-    if (r < 0.65 || r > 47.0) return 0.0;
-
-    // ----------------------------------------------------------
-    // 1. RADIAL DISTRIBUTION
-    //    Prominent across central bar and spiral arms, smooth outer fade
-    // ----------------------------------------------------------
-    float inner_ramp = smoothstep(0.65, 2.2, r);
-    float disk_profile = r * exp(-r / 11.0);
-    disk_profile = disk_profile / (11.0 * exp(-1.0));
-    float outer_fade = 1.0 - smoothstep(36.0, 46.0, r);
-
-    float radial = inner_ramp * disk_profile * outer_fade;
-
-    // ----------------------------------------------------------
-    // 2. VERTICAL PROFILE
-    //    Physically motivated thin dust (73 pc scale height, h ~ 0.10)
-    //    and thicker diffuse dust (225 pc scale height, h ~ 0.32)
-    // ----------------------------------------------------------
-    float h_thin = u_dustHeightScale * (0.10 + 0.08 * smoothstep(4.0, 30.0, r));
-    float h_thick = u_dustHeightScale * (0.28 + 0.14 * smoothstep(4.0, 30.0, r));
-    float y2 = p.y * p.y;
-    float vert_thin = exp(-0.5 * y2 / (h_thin * h_thin + 1e-5));
-    float vert_thick = exp(-0.5 * y2 / (h_thick * h_thick + 1e-5));
-    float vertical = 0.72 * vert_thin + 0.28 * vert_thick;
-
-    // ----------------------------------------------------------
-    // 3. SPIRAL ARM & BAR ALIGNMENT
-    //    Aligned with galactic_disk.py logarithmic arms + bar leading-edge lanes
-    // ----------------------------------------------------------
-    float r_arm = max(r, INNER_ARM_R);
-    float theta = atan(p.z, p.x);
-
-    // Find angular distance to closest spiral arm
-    float min_dist = 100.0;
-    for (int i = 0; i < int(ARM_COUNT); i++) {
-        float arm_base = float(i) * (TWO_PI / ARM_COUNT);
-        float ideal_theta = arm_base + ARM_BASE_OFFSET + SPIRAL_TIGHTNESS * log(r_arm / INNER_ARM_R);
-
-        float d_theta = mod(theta - ideal_theta + PI, TWO_PI) - PI;
-        float d_arm = abs(d_theta - u_dustArmOffset);
-        min_dist = min(min_dist, d_arm);
-    }
-
-    float linear_dist = min_dist * r;
-
-    // Narrow dense lane (Gaussian core)
-    float lane_w = u_dustLaneWidth * r;
-    float dense_lane = exp(-linear_dist * linear_dist / (lane_w * lane_w + 0.001));
-
-    // Broader diffuse envelope
-    float diff_w = u_dustDiffuseWidth * r;
-    float diffuse_env = exp(-linear_dist * linear_dist / (diff_w * diff_w + 0.001)) * 0.25;
-
-    float arm_factor = (dense_lane + diffuse_env) * smoothstep(2.5, 5.0, r);
-
-    // Bar leading-edge dust lanes (characteristic dark lanes cutting across the central bar)
-    if (r < 7.5) {
-        float sin_b = sin(BAR_ANGLE);
-        float cos_b = cos(BAR_ANGLE);
-        float u = p.x * sin_b + p.z * cos_b;
-        float v = -p.x * cos_b + p.z * sin_b;
-        
-        float target_v = sign(u) * 0.38;
-        float dv = abs(v - target_v);
-        float bar_lane = exp(-dv * dv / 0.035) * smoothstep(0.8, 1.8, abs(u)) * (1.0 - smoothstep(6.5, 7.5, abs(u)));
-        arm_factor = max(arm_factor, bar_lane * 1.6);
-    }
-
-    // ----------------------------------------------------------
-    // 4. MULTI-SCALE NOISE — domain-warped for filamentary structure
-    // ----------------------------------------------------------
-    float ns = u_dustNoiseScale;
-
-    // Domain warp: offset sample position with noise to create filaments
-    vec3 warp_offset = vec3(
-        fbm3(p * ns * 0.12 + vec3(5.2, 1.3, 9.7)),
-        fbm3(p * ns * 0.12 + vec3(3.7, 8.1, 2.4)),
-        fbm3(p * ns * 0.12 + vec3(1.9, 4.6, 7.3))
-    ) * 3.0;
-
-    vec3 warped = p + warp_offset;
-
-    // Large-scale: broad clouds and gaps across the galaxy
-    float n_large = fbm3(warped * ns * 0.15);
-    float cloud_mask = smoothstep(0.22, 0.65, n_large);
-
-    // Medium-scale: broken lanes, molecular cloud clumps
-    float n_medium = fbm5(warped * ns * 0.5 + vec3(12.3, 4.5, 6.7));
-    float clumps = smoothstep(0.18, 0.62, n_medium);
-
-    // Fine-scale: wisps and irregular boundaries
-    float n_fine = fbm3(p * ns * 1.5 + vec3(7.1, 2.8, 5.3));
-    float wisps = 0.65 + 0.35 * n_fine;
-
-    // Layered modulation preserves spatially connected filamentary lanes
-    // with irregular clumps and lower-density transparent windows
-    float noise_combined = mix(0.40, 1.25, clumps) * wisps * mix(0.45, 1.20, cloud_mask);
-
-    // ----------------------------------------------------------
-    // 5. COMBINE all factors
-    // ----------------------------------------------------------
-    float density = radial * vertical * arm_factor * noise_combined * u_dustDensity;
-
-    return max(density, 0.0);
-}
-
 
 vec2 intersectCylinder(vec3 ro, vec3 rd, float R) {
     float a = rd.x * rd.x + rd.z * rd.z;
     if (a < 1e-7) {
         float r2 = ro.x * ro.x + ro.z * ro.z;
-        if (r2 < R * R) return vec2(0.0, 300.0);
-        return vec2(0.0, -1.0);
+        return (r2 < R * R) ? vec2(0.0, 200.0) : vec2(0.0, -1.0);
     }
     float b = 2.0 * (ro.x * rd.x + ro.z * rd.z);
     float c = ro.x * ro.x + ro.z * ro.z - R * R;
@@ -241,75 +84,328 @@ vec2 intersectCylinder(vec3 ro, vec3 rd, float R) {
     return vec2(min(t1, t2), max(t1, t2));
 }
 
+// Evaluate single nebula volume emission & dust self-opacity at p_local
+void evalNebulaSample(
+    int idx, vec3 p_local, vec4 n_broad, vec4 n_detail,
+    out vec3 out_emit, out float out_sigma
+) {
+    out_emit = vec3(0.0);
+    out_sigma = 0.0;
+
+    vec4 pos_r = u_nebulae_pos[idx];
+    vec3 n_pos = pos_r.xyz;
+    float n_rad = pos_r.w;
+    if (n_rad < 0.05) return;
+
+    // Seeded local spiral-sheared orientation frame per nebula
+    float seed_a = float(idx) * 2.39996;
+    float yaw = atan(n_pos.z, n_pos.x) + atan(SPIRAL_TIGHTNESS, 1.0) + 0.45 * sin(seed_a);
+    float cy = cos(yaw);
+    float sy = sin(yaw);
+
+    vec3 d = p_local - n_pos;
+    // Rotate into anisotropic elliptical nebula frame stretched slightly along arm shear
+    vec3 d_rot = vec3(
+        d.x * cy + d.z * sy,
+        d.y,
+        -d.x * sy + d.z * cy
+    );
+
+    float stretch_x = 1.12 + 0.22 * cos(seed_a * 1.7);
+    float stretch_z = 0.70 + 0.16 * sin(seed_a * 2.3);
+    float stretch_y = 0.38; // Nebulae tightly confined near star-forming thin disk
+
+    vec3 q = d_rot / vec3(n_rad * stretch_x, n_rad * stretch_y, n_rad * stretch_z);
+    // Domain warp with 3D turbulence so boundaries are jagged & ragged, never round discs
+    q += (n_detail.rgb - 0.5) * 0.46 + (n_broad.rgb - 0.5) * 0.20;
+
+    float d_norm = length(q);
+    if (d_norm >= 1.0) return;
+
+    float radial_env = 1.0 - smoothstep(0.08, 1.0, d_norm);
+    // Asymmetric ionized cavity/knot center slightly offset inside parent complex
+    vec3 knot_off = vec3(0.20 * sin(seed_a * 3.1), 0.0, 0.16 * cos(seed_a * 2.7));
+    float core_r = length(q - knot_off);
+    float core_focus = exp(-core_r * core_r * 7.5);
+
+    // Multi-scale filamentary & clumpy gas density inside nebula envelope
+    float fil = mix(n_detail.g, n_broad.g, 0.35);
+    float clump = smoothstep(0.20, 0.82, n_detail.b * 0.65 + n_broad.r * 0.35);
+    float wisp = mix(0.28, 1.40, fil) * mix(0.42, 1.30, clump);
+
+    float gas_density = clamp(radial_env * wisp * (0.48 + 0.95 * core_focus), 0.0, 2.2);
+    // Crisp zero outside carved filaments
+    gas_density = max(0.0, gas_density - 0.08) / 0.92;
+    if (gas_density <= 0.005) return;
+
+    vec4 c_data = u_nebulae_col[idx];
+    vec3 base_col = c_data.rgb;
+    float strength = c_data.a;
+
+    bool is_reflection = (base_col.b > base_col.r * 1.05);
+    vec3 final_col;
+    if (is_reflection) {
+        // Blue reflection nebulae scatter hot OB light -> cool sapphire outer wisps, pale blue-white core
+        vec3 core_tint = mix(base_col, vec3(0.76, 0.90, 1.05), clamp(core_focus * 0.55, 0.0, 0.60));
+        final_col = core_tint * mix(0.75, 1.15, gas_density);
+    } else {
+        // Deep H-alpha crimson in outer ragged filaments, rich ruby/rose in ionized blister cores
+        vec3 h_deep = base_col * vec3(1.06, 0.54, 0.64);
+        vec3 h_core = mix(base_col * vec3(1.10, 0.85, 0.90), vec3(1.00, 0.60, 0.68), 0.45);
+        final_col = mix(h_deep, h_core, clamp(core_focus * gas_density * 0.95, 0.0, 0.85));
+    }
+
+    // Natural luminosity profile: crisp bright ionized knots inside softer crimson skirts
+    float em_intensity = (0.38 * gas_density + 1.05 * core_focus * gas_density) * strength * 1.38;
+    out_emit = final_col * em_intensity;
+    out_sigma = gas_density * strength * 0.38;
+}
+
 void main() {
-    // 1. Reconstruct ray direction in world space
     vec2 ndc = v_uv * 2.0 - 1.0;
     vec4 target = u_invVP * vec4(ndc, 1.0, 1.0);
     vec3 rd = normalize(target.xyz / target.w - u_camPos);
     vec3 ro = u_camPos;
 
-    // Transform ray to local galaxy space
     vec3 ro_local = (u_galaxyModel * vec4(ro, 1.0)).xyz;
     vec3 rd_local = normalize((u_galaxyModel * vec4(rd, 0.0)).xyz);
 
-    // 2. Intersect with galactic dust slab (|y| <= slab_H)
-    float slab_H = 1.8;
-    vec2 t_slab = intersectSlab(ro_local, rd_local, slab_H);
+    vec2 t_slab = intersectSlab(ro_local, rd_local, SLAB_H);
+    vec2 t_cyl  = intersectCylinder(ro_local, rd_local, CYL_R);
 
-    // 3. Intersect with active galactic disk cylinder (r <= 47.0)
-    vec2 t_cyl = intersectCylinder(ro_local, rd_local, 47.0);
+    vec3  T_ccm = vec3(1.0);
+    vec4  bin_tau = vec4(0.0);
+    vec3  accum_emission = vec3(0.0);
+    float neb_transmittance = 1.0;
+    float dust_front_depth = -1.0;
+    float neb_front_depth = -1.0;
 
-    float optical_depth = 0.0;
-    float front_depth = -1.0;   // linear distance to first significant dust
+    bool active_ism = (u_hasISMTextures != 0) && (u_dustWeight > 0.001 || (u_unifiedISM != 0 && u_nebulaWeight > 0.001));
 
-    if (t_slab.y > t_slab.x && t_cyl.y > t_cyl.x && u_dustWeight > 0.001) {
+    if (active_ism && t_slab.y > t_slab.x && t_cyl.y > t_cyl.x) {
         float t_start = max(max(0.0, t_slab.x), t_cyl.x);
-        float t_end = min(min(t_slab.y, t_cyl.y), 160.0);
+        float t_end   = min(min(t_slab.y, t_cyl.y), 160.0);
 
         if (t_end > t_start) {
-            // Adaptive sampling: guarantee step size is fine enough to resolve
-            // narrow dust lanes (lane half-width ~0.06-0.18) without exceeding GPU budget
             float path_len = t_end - t_start;
-            float target_dt = clamp(path_len / 48.0, 0.20, 0.55);
-            int steps = clamp(int(ceil(path_len / target_dt)), 24, 56);
-            float dt = path_len / float(steps);
 
-            // Stable jitter using interleaved gradient noise
+            // Collect closest up to 8 intersecting nebulae sorted front-to-back by tin
+            const int MAX_HITS = 8;
+            int   hit_count = 0;
+            int   hit_idx[8];
+            float hit_tin[8];
+            float hit_tout[8];
+            float min_neb_rad = 10.0;
+            float neb_span_min = 1e9;
+            float neb_span_max = -1.0;
+
+            if (u_unifiedISM != 0 && u_nebulaWeight > 0.001) {
+                int count_max = min(u_numNebulae, 150);
+                for (int j = 0; j < count_max; j++) {
+                    vec3 n_pos = u_nebulae_pos[j].xyz;
+                    float n_rad = u_nebulae_pos[j].w;
+                    if (n_rad < 0.05) continue;
+
+                    // Generous spherical bound to encompass anisotropic stretch & domain warp
+                    float bound_r = n_rad * 1.48;
+                    vec3 oc = n_pos - ro_local;
+                    float t_proj = dot(oc, rd_local);
+                    float d2 = dot(oc, oc) - t_proj * t_proj;
+                    float r2 = bound_r * bound_r;
+
+                    if (d2 < r2) {
+                        float h = sqrt(r2 - d2);
+                        float tin  = max(t_start, t_proj - h);
+                        float tout = min(t_end,   t_proj + h);
+                        if (tout > tin && tout > 0.0) {
+                            neb_span_min = min(neb_span_min, tin);
+                            neb_span_max = max(neb_span_max, tout);
+                            min_neb_rad = min(min_neb_rad, n_rad);
+
+                            if (hit_count < MAX_HITS) {
+                                hit_idx[hit_count] = j;
+                                hit_tin[hit_count] = tin;
+                                hit_tout[hit_count] = tout;
+                                hit_count++;
+                            } else {
+                                // Replace farthest entry if this nebula starts closer along ray
+                                int far_k = 0;
+                                for (int m = 1; m < MAX_HITS; m++) {
+                                    if (hit_tin[m] > hit_tin[far_k]) far_k = m;
+                                }
+                                if (tin < hit_tin[far_k]) {
+                                    hit_idx[far_k] = j;
+                                    hit_tin[far_k] = tin;
+                                    hit_tout[far_k] = tout;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Adaptive march step: fast vertically face-on, dense along edge-on paths without banding
+            float target_dt = clamp(path_len / 52.0, 0.085, 0.58);
+            int base_steps = clamp(int(ceil(path_len / target_dt)), 14, 56);
+            float dt_base = path_len / float(base_steps);
+
             vec2 pixel = gl_FragCoord.xy;
             float jitter = interleavedGradientNoise(pixel);
-            float t = t_start + dt * jitter;
+            float t = t_start + dt_base * (jitter * 0.85 + 0.075);
 
-            float transmittance = 1.0;
+            // CCM (1989) wavelength-dependent extinction ratios:
+            // Diffuse warm amber-brown dust vs neutral dark dense molecular cloud cores
+            const vec3 K_DIFFUSE = vec3(0.70, 1.00, 1.44);
+            const vec3 K_DENSE   = vec3(0.91, 1.00, 1.11);
 
-            for (int i = 0; i < 56; i++) {
-                if (i >= steps || t > t_end || transmittance < 0.01) break;
+            for (int iter = 0; iter < 92; iter++) {
+                if (t > t_end) break;
+                if (dot(T_ccm, vec3(0.333)) < 0.004) break;
+
+                // Determine adaptive sub-step if inside active nebula span
+                float ds = dt_base;
+                bool in_neb_span = (hit_count > 0) && (t >= neb_span_min - 0.08) && (t <= neb_span_max + 0.08);
+                if (in_neb_span) {
+                    ds = min(dt_base, clamp(min_neb_rad * 0.32, 0.09, 0.24));
+                }
+                ds = min(ds, max(0.02, t_end - t + ds * 0.5));
 
                 vec3 p_local = ro_local + rd_local * t;
                 float r = length(p_local.xz);
 
-                // Quick rejection outside active dust envelope
-                if (r >= 0.65 && r <= 46.5 && abs(p_local.y) <= 1.8) {
-                    float dens = getDustDensity(p_local);
+                if (r >= 0.68 && r <= 47.0 && abs(p_local.y) <= SLAB_H) {
+                    // 1. Two-tier tileable 3D multi-scale noise (domain warp + filaments + clumps + fine wisps)
+                    float ns = max(u_dustNoiseScale, 0.2) * 1.25;
+                    vec4 n_broad  = texture(u_noiseVol3D, p_local * (0.048 * ns) + vec3(0.11, 0.27, 0.43));
+                    vec3 p_warp   = p_local + (n_broad.rgb - 0.5) * vec3(1.20, 0.16, 1.20);
+                    vec4 n_detail = texture(u_noiseVol3D, p_warp * (0.24 * ns) + vec3(0.37, 0.61, 0.19));
 
-                    if (dens > 0.001) {
-                        if (front_depth < 0.0) {
-                            front_depth = t;
-                        }
-                        optical_depth += dens * dt;
-                        transmittance = exp(-optical_depth * u_dustOpacity * u_dustWeight);
+                    // 2. Sample spiral macro ISM structure
+                    vec2 uv_sp = (p_local.xz + (n_broad.rb - 0.5) * 0.46 + 47.5) / 95.0;
+                    vec4 sp = texture(u_ismSpiralMap, clamp(uv_sp, 0.001, 0.999));
+                    float thin_map  = sp.r;
+                    float diff_map  = sp.g;
+                    float mol_ridge = sp.b;
+                    float rad_mask  = sp.a;
+
+                    // 3. Stratified vertical profiles (81 pc thin dust vs 152 pc diffuse dust)
+                    float flare = 1.0 + 0.15 * smoothstep(18.0, 44.0, r);
+                    float h_thin  = max(u_dustHeightScale, 0.2) * H_DUST_THIN_BASE  * flare;
+                    float h_thick = max(u_dustHeightScale, 0.2) * H_DUST_THICK_BASE * flare;
+                    float y2 = p_local.y * p_local.y;
+                    float vert_thin  = exp(-0.5 * y2 / (h_thin  * h_thin));
+                    float vert_thick = exp(-0.5 * y2 / (h_thick * h_thick));
+
+                    // 4. Thin filamentary + clumpy arm/spur/bar dust
+                    float fil = mix(n_detail.g, n_detail.a, 0.35);
+                    float clumps = smoothstep(0.16, 0.80, n_broad.r * 0.42 + n_detail.b * 0.58);
+                    float edge_wisp = 0.42 + 0.82 * n_detail.a;
+                    float sigma_thin = thin_map * vert_thin * (0.26 + 1.28 * fil * edge_wisp) * (0.52 + 0.96 * clumps);
+
+                    // 5. Weaker, smoother thicker diffuse cirrus component
+                    float sigma_thick = diff_map * vert_thick * (0.50 + 0.72 * n_broad.r) * (0.72 + 0.42 * n_detail.a);
+
+                    // 6. Sample precomputed 3D Molecular Clouds + Local Nebula Illumination (skip far off-plane empty regions)
+                    vec4 mol = vec4(0.0);
+                    if (abs(p_local.y) <= 0.65 && (diff_map > 0.045 || in_neb_span)) {
+                        vec3 uvw_base = vec3(
+                            (p_local.x + 47.0) / 94.0,
+                            (p_local.z + 47.0) / 94.0,
+                            (p_local.y + 0.90) / 1.80
+                        );
+                        vec3 uvw_warp = (n_detail.rgb - 0.5) * vec3(0.011, 0.011, 0.045);
+                        mol = texture(u_molCloudTex, clamp(uvw_base + uvw_warp, 0.001, 0.999));
                     }
+
+                    // Sculpt irregular fractal-like molecular cloud clumps & cores
+                    float mol_erode = smoothstep(0.18, 0.76, n_detail.b * 0.56 + n_detail.g * 0.28 + n_detail.a * 0.16);
+                    float ridge_knot = max(0.0, mol_ridge * vert_thin * (n_detail.b * n_detail.g - 0.14) * 2.4) * rad_mask;
+                    float sigma_mol_env  = mol.r * mix(0.32, 1.45, mol_erode) * rad_mask + ridge_knot * 0.60;
+                    float sigma_mol_core = mol.g * smoothstep(0.22, 0.82, n_detail.b * 0.65 + n_broad.b * 0.35) * rad_mask + ridge_knot * 0.40;
+
+                    float w_dust = u_dustWeight * u_dustOpacity * u_dustDensity;
+                    float coeff_diff = (sigma_thin * 0.56 + sigma_thick * 0.21) * w_dust;
+                    float coeff_mol  = (sigma_mol_env * 0.92 + sigma_mol_core * 2.10) * w_dust;
+
+                    // 7. Nebula Emission & Coupled 3D Self-Absorption
+                    vec3  S_neb = vec3(0.0);
+                    float coeff_neb = 0.0;
+                    if (in_neb_span) {
+                        for (int k = 0; k < MAX_HITS; k++) {
+                            if (k >= hit_count) break;
+                            if (t >= hit_tin[k] - 0.04 && t <= hit_tout[k] + 0.04) {
+                                vec3 n_em;
+                                float n_sig;
+                                evalNebulaSample(hit_idx[k], p_local, n_broad, n_detail, n_em, n_sig);
+                                S_neb += n_em;
+                                coeff_neb += n_sig;
+                            }
+                        }
+                        S_neb *= u_nebulaWeight;
+                        coeff_neb *= u_nebulaWeight;
+                    }
+
+                    // 8. Subtle Illumination of Nearby Dust Filaments by H-II / OB Photons
+                    float dust_scat_carrier = sigma_thin * 0.42 + sigma_mol_env * 0.50 + sigma_thick * 0.12;
+                    vec3 illum_col = mol.b * vec3(0.95, 0.24, 0.30) + mol.a * vec3(0.36, 0.72, 1.00);
+                    vec3 S_scatter = illum_col * dust_scat_carrier * u_nebulaWeight * 0.24;
+
+                    // Track front depths
+                    if (dust_front_depth < 0.0 && (coeff_diff + coeff_mol) > 0.008) {
+                        dust_front_depth = t;
+                    }
+                    if (neb_front_depth < 0.0 && (dot(S_neb, vec3(1.0)) > 0.015 || coeff_neb > 0.008)) {
+                        neb_front_depth = t;
+                    }
+
+                    // 9. Exact Front-to-Back Radiative Transfer Step:
+                    //    L_out = L_in * exp(-d_tau) + S_source * (1 - exp(-d_tau)) / alpha
+                    vec3 d_tau = coeff_diff * K_DIFFUSE * ds + coeff_mol * K_DENSE * ds + vec3(coeff_neb * ds);
+                    vec3 T_step = exp(-d_tau);
+                    vec3 slab_weight = mix(
+                        1.0 - 0.5 * d_tau,
+                        (1.0 - T_step) / max(d_tau, vec3(1e-4)),
+                        greaterThan(d_tau, vec3(1e-3))
+                    );
+
+                    vec3 S_total = S_neb + S_scatter;
+                    vec3 step_emitted = S_total * ds * slab_weight;
+
+                    accum_emission += step_emitted * T_ccm;
+                    T_ccm *= T_step;
+                    if (coeff_neb > 0.0) {
+                        neb_transmittance *= exp(-coeff_neb * ds);
+                    }
+
+                    // Accumulate optical depth into 4 equal bins along [t_start, t_end]
+                    // for exact per-pixel star depth splitting in dust_comp_frag.glsl
+                    float bin_f = clamp((t - t_start) / max(path_len, 1e-4), 0.0, 0.9999) * 4.0;
+                    int b_idx = int(floor(bin_f));
+                    float d_tau_v = d_tau.g;
+                    if (b_idx == 0) bin_tau.x += d_tau_v;
+                    else if (b_idx == 1) bin_tau.y += d_tau_v;
+                    else if (b_idx == 2) bin_tau.z += d_tau_v;
+                    else bin_tau.w += d_tau_v;
                 }
 
-                t += dt;
+                t += ds;
             }
         }
     }
 
-    // Transmittance: exp(-optical_depth * opacity * weight)
-    float final_transmittance = exp(-optical_depth * u_dustOpacity * u_dustWeight);
+    float encoded_dust_depth = (dust_front_depth < 0.0) ? 1.0 : clamp(dust_front_depth / 200.0, 0.0002, 0.998);
+    float encoded_neb_depth  = (neb_front_depth  < 0.0) ? 1.0 : clamp(neb_front_depth  / 200.0, 0.0002, 0.998);
 
-    // Encode front depth as linear distance; >= 1.0 means no dust hit
-    float encoded_depth = (front_depth < 0.0) ? 1.0 : clamp(front_depth / 200.0, 0.0002, 0.998);
-
-    fragColor = vec4(final_transmittance, encoded_depth, 0.0, 1.0);
+    if (u_unifiedISM != 0) {
+        fragDustTrans   = vec4(T_ccm, encoded_dust_depth);
+        fragTauBins     = bin_tau;
+        fragNebulaColor = vec4(accum_emission, neb_transmittance);
+        fragNebulaDepth = encoded_neb_depth;
+    } else {
+        // Legacy fallback signature (RG = scalar transmittance, front depth)
+        fragDustTrans   = vec4(T_ccm.g, encoded_dust_depth, 0.0, 1.0);
+        fragTauBins     = bin_tau;
+        fragNebulaColor = vec4(0.0, 0.0, 0.0, 1.0);
+        fragNebulaDepth = 1.0;
+    }
 }

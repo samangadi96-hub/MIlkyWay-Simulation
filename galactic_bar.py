@@ -17,7 +17,7 @@ class GalacticBar:
     - Fully compatible with the existing star rendering pipeline and coordinate transforms.
     """
 
-    def __init__(self, ctx, base_dir, num_stars=600000, bar_width_0=0.82, seed=42, diagnostic_mode=False):
+    def __init__(self, ctx, base_dir, num_stars=600000, bar_width_0=0.82, seed=42, diagnostic_mode=False, far_accumulator=None):
         self.bar_width_0 = bar_width_0
         self.ctx = ctx
         self.num_stars = num_stars
@@ -162,6 +162,9 @@ class GalacticBar:
         )
 
         star_data = np.column_stack((positions, colors, sizes, brightness)).astype('f4')
+
+        if far_accumulator is not None:
+            far_accumulator.accumulate_bar(positions, colors, brightness)
 
         self.vbo = self.ctx.buffer(star_data.tobytes())
         self.vao = self.ctx.vertex_array(

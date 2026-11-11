@@ -15,6 +15,8 @@ from galactic_disk import GalacticDisk
 from nebula import NebulaManager
 from galactic_map import GalacticMap
 from far_galaxy import FarGalaxy
+from ism import ISMVolumeManager
+from s_stars import SStarCluster
 
 class MilkyWaySimulation(mglw.WindowConfig):
 
@@ -40,11 +42,15 @@ class MilkyWaySimulation(mglw.WindowConfig):
         self.galactic_disk = GalacticDisk(self.ctx, Path(__file__).parent, nebula_stars=self.nebula_mgr.get_stars_array())
         self.galactic_map  = GalacticMap(self.ctx, Path(__file__).parent)
         self.far_galaxy    = FarGalaxy(self.ctx, Path(__file__).parent, nebula_mgr=self.nebula_mgr, disk=self.galactic_disk, bar=self.bar, bulge=self.bulge)
+        self.ism           = ISMVolumeManager(self.ctx, nebula_mgr=self.nebula_mgr)
+        self.s_stars       = SStarCluster(self.ctx, Path(__file__).parent, bh_mass=self.blackhole.mass)
         
         # ==========================================================
         # Differential Galactic Rotation & Simulation Clock
         # ==========================================================
         self.sim_time = 0.0
+        self.s_star_years = 0.0
+        self.s_star_time_scale = 2.0  # S-cluster years per real second at 1x speed
         self.sim_speed = 1.0
         self.sim_paused = False
         self.v_flat = self.galactic_disk.v_flat
@@ -80,6 +86,8 @@ class MilkyWaySimulation(mglw.WindowConfig):
         print('  N                -> toggle nebula debug')
         print('  B                -> cycle post-processing debug views')
         print('  M                -> toggle scientific galactic map overlay')
+        print('  O                -> toggle Sgr A* S-star cluster & orbits')
+        print('  Y                -> toggle S-star identification labels & legend')
         print('  --------------------------------')
         print()
 
@@ -272,18 +280,19 @@ class MilkyWaySimulation(mglw.WindowConfig):
             self.nebula_program, [(self.main_quad_buffer, "2f", "in_position")]
         )
         
-        # Pass static nebula data to shader
+        # Pass static nebula data to unified ISM & standalone nebula shaders
         neb_pos, neb_col = self.nebula_mgr.get_shader_uniforms()
-        if "u_numNebulae" in self.nebula_program:
-            self.nebula_program["u_numNebulae"].value = self.nebula_mgr.num_nebulae
         pos_data = np.zeros(150 * 4, dtype="f4")
         col_data = np.zeros(150 * 4, dtype="f4")
         pos_data[:len(neb_pos)] = neb_pos
         col_data[:len(neb_col)] = neb_col
-        if "u_nebulae_pos" in self.nebula_program:
-            self.nebula_program["u_nebulae_pos"].write(pos_data.tobytes())
-        if "u_nebulae_col" in self.nebula_program:
-            self.nebula_program["u_nebulae_col"].write(col_data.tobytes())
+        for neb_prog in (self.dust_program, self.nebula_program):
+            if "u_numNebulae" in neb_prog:
+                neb_prog["u_numNebulae"].value = self.nebula_mgr.num_nebulae
+            if "u_nebulae_pos" in neb_prog:
+                neb_prog["u_nebulae_pos"].write(pos_data.tobytes())
+            if "u_nebulae_col" in neb_prog:
+                neb_prog["u_nebulae_col"].write(col_data.tobytes())
 
 
         self.renderer = Renderer(
@@ -334,21 +343,27 @@ class MilkyWaySimulation(mglw.WindowConfig):
         self.star_tex.filter = (self.ctx.LINEAR, self.ctx.LINEAR)
         self.star_fbo = self.ctx.framebuffer(color_attachments=[self.star_tex])
 
-        # Quarter-resolution FBO for dust pass
-        # 2 components (RG16F): R = transmittance, G = front dust depth
+        # Scaled 3/8-resolution unified 3D ISM MRT FBO (480x270 at 1280x720: 2.25x sharper than 1/4-res, fast on iGPU)
+        iw, ih = max((width * 3) // 8, 1), max((height * 3) // 8, 1)
         qw, qh = max(width // 4, 1), max(height // 4, 1)
-        self.dust_tex = self.ctx.texture((qw, qh), 2, dtype='f2')
+        self.dust_tex = self.ctx.texture((iw, ih), 4, dtype='f2')  # RGBA16F: RGB=CCM T, A=front depth
         self.dust_tex.filter = (self.ctx.LINEAR, self.ctx.LINEAR)
         self.dust_fbo = self.ctx.framebuffer(color_attachments=[self.dust_tex])
 
-        # Quarter-resolution FBO for nebula pass
-        self.nebula_col_tex = self.ctx.texture((qw, qh), 4, dtype='f2') # RGBA16F: RGB=Emission, A=Transmittance
+        self.ism_bins_tex = self.ctx.texture((iw, ih), 4, dtype='f2')  # RGBA16F: 4-bin cumulative optical depth
+        self.ism_bins_tex.filter = (self.ctx.LINEAR, self.ctx.LINEAR)
+        self.ism_bins_fbo = self.ctx.framebuffer(color_attachments=[self.ism_bins_tex])
+
+        self.nebula_col_tex = self.ctx.texture((iw, ih), 4, dtype='f2')  # RGBA16F: RGB=Emission, A=Transmittance
         self.nebula_col_tex.filter = (self.ctx.LINEAR, self.ctx.LINEAR)
-        self.nebula_depth_tex = self.ctx.texture((qw, qh), 1, dtype='f2') # R16F: Front depth
+        self.nebula_depth_tex = self.ctx.texture((iw, ih), 1, dtype='f2')  # R16F: Front depth
         self.nebula_depth_tex.filter = (self.ctx.NEAREST, self.ctx.NEAREST)
         self.nebula_fbo = self.ctx.framebuffer(color_attachments=[self.nebula_col_tex, self.nebula_depth_tex])
         self.nebula_col_fbo = self.ctx.framebuffer(color_attachments=[self.nebula_col_tex])
         self.nebula_depth_fbo = self.ctx.framebuffer(color_attachments=[self.nebula_depth_tex])
+        self.ism_fbo = self.ctx.framebuffer(
+            color_attachments=[self.dust_tex, self.ism_bins_tex, self.nebula_col_tex, self.nebula_depth_tex]
+        )
 
         # Intermediate composited scene FBO (full res RGBA16F)
         self.comp_tex = self.ctx.texture((width, height), 4, dtype='f2')
@@ -389,11 +404,14 @@ class MilkyWaySimulation(mglw.WindowConfig):
         self.star_fbo.release()
         self.dust_tex.release()
         self.dust_fbo.release()
+        self.ism_bins_tex.release()
+        self.ism_bins_fbo.release()
         self.nebula_col_tex.release()
         self.nebula_depth_tex.release()
         self.nebula_col_fbo.release()
         self.nebula_depth_fbo.release()
         self.nebula_fbo.release()
+        self.ism_fbo.release()
         self.comp_tex.release()
         self.comp_fbo.release()
 
@@ -480,6 +498,16 @@ class MilkyWaySimulation(mglw.WindowConfig):
                 status = "ON" if self.galactic_map.enabled else "OFF"
                 print(f"\n[Map] Scientific Galactic Map Overlay: {status}")
 
+            elif key == self.wnd.keys.O:
+                self.s_stars.show_cluster = not self.s_stars.show_cluster
+                status = "ON" if self.s_stars.show_cluster else "OFF"
+                print(f"\n[Sgr A*] S-Star Cluster & Orbits: {status}")
+
+            elif key == self.wnd.keys.Y:
+                self.s_stars.show_labels = not self.s_stars.show_labels
+                status = "ON" if self.s_stars.show_labels else "OFF"
+                print(f"\n[Sgr A*] S-Star Identification Overlay: {status}")
+
             elif key == self.wnd.keys.SPACE:
                 self.sim_paused = not self.sim_paused
                 status = "PAUSED" if self.sim_paused else "RUNNING"
@@ -495,6 +523,7 @@ class MilkyWaySimulation(mglw.WindowConfig):
 
             elif key in (self.wnd.keys.BACKSPACE, self.wnd.keys.NUMBER_0):
                 self.sim_time = 0.0
+                self.s_star_years = 0.0
                 self.galaxy_rotation_angle = 0.0
                 print(f"\n[Sim] Simulation Clock Reset to t=0.0s")
 
@@ -576,6 +605,9 @@ class MilkyWaySimulation(mglw.WindowConfig):
         # Single elapsed simulation clock with pause/resume and speed control
         if not self.sim_paused:
             self.sim_time += frametime * self.sim_speed
+            self.s_star_years += frametime * self.s_star_time_scale * self.sim_speed
+
+        self.s_stars.update(self.s_star_years, cam_pos)
 
         # Reverse apparent galaxy rotation from anticlockwise to clockwise:
         # signed_pattern_angle = -pattern_speed * sim_time
@@ -842,8 +874,17 @@ class MilkyWaySimulation(mglw.WindowConfig):
             )
 
         # ----------------------------------------------------------
-        # Post-process passes (Black hole raymarcher)
+        # Post-process passes (Black hole raymarcher + depth-split S-stars)
         # ----------------------------------------------------------
+        # Far-side S-stars & orbits behind Sgr A* (occluded/attenuated by BH shadow & disk)
+        self.fbo.use()
+        self.s_stars.render_side(
+            self.camera,
+            bh.aspect_ratio,
+            self.wnd.size,
+            side_filter=-1,
+        )
+
         # Composite mode: StarColor * Transmittance + GasColor * 1.0
         self.fbo.use()
         self.ctx.disable(self.ctx.DEPTH_TEST)
@@ -852,20 +893,23 @@ class MilkyWaySimulation(mglw.WindowConfig):
         self.ctx.blend_func = (self.ctx.ONE, self.ctx.SRC_ALPHA)
         
         self.renderer.render(lod_state)
+
+        # Near-side S-stars & orbits transiting in front of Sgr A*
+        self.s_stars.render_side(
+            self.camera,
+            bh.aspect_ratio,
+            self.wnd.size,
+            side_filter=1,
+        )
         
         # Restore depth mask after BH rendering
         self.ctx.depth_mask = True
 
         # ----------------------------------------------------------
-        # PASS 1.5: Galaxy Dust (quarter-res)
+        # PASS 1.5: Unified 3D Interstellar Medium (Dust + Molecular Clouds + Coupled Nebulae)
         # ----------------------------------------------------------
         dust_weight = 0.0
         if dist > 8.0:
-            # Smoother, wider transition curve
-            # ~8-12: gradual introduction
-            # ~12-30: clearly visible
-            # ~30-50: strongest
-            # 50+: sustained
             if dist < 15.0:
                 t = max(0.0, min(1.0, (dist - 8.0) / 7.0))
                 dust_weight = t * t * (3.0 - 2.0 * t) * 0.4
@@ -876,43 +920,7 @@ class MilkyWaySimulation(mglw.WindowConfig):
                 t = max(0.0, min(1.0, (dist - 30.0) / 20.0))
                 dust_weight = 0.9 + t * t * (3.0 - 2.0 * t) * 0.1
         dust_weight *= (1.0 - galaxy_far_weight)
-        
-        self.dust_fbo.use()
-        self.ctx.clear(1.0, 1.0, 0.0, 1.0) # R=1.0 (full transmittance), G=1.0 (no dust hit)
-        self.ctx.disable(self.ctx.BLEND)
-        self.ctx.disable(self.ctx.DEPTH_TEST)
-        
-        if dust_weight > 0.001:
-            vp = self.camera.get_projection_matrix(bh.aspect_ratio) * self.camera.get_view_matrix()
-            if "u_camPos" in self.dust_program:
-                self.dust_program["u_camPos"].value = self.camera.get_position()
-            if "u_invVP" in self.dust_program:
-                self.dust_program["u_invVP"].write(glm.inverse(vp))
-            if "u_dustWeight" in self.dust_program:
-                self.dust_program["u_dustWeight"].value = dust_weight
-            if "u_galaxyModel" in self.dust_program:
-                # To rotate dust WITH galaxy, we pass inverse galaxy rotation so camera effectively rotates
-                inv_model = glm.rotate(glm.mat4(1.0), -self.galaxy_rotation_angle, glm.vec3(0.0, 1.0, 0.0))
-                self.dust_program["u_galaxyModel"].write(inv_model)
-            
-            # Dust tunable params
-            if "u_dustOpacity" in self.dust_program: self.dust_program["u_dustOpacity"].value = 1.2
-            if "u_dustWidth" in self.dust_program: self.dust_program["u_dustWidth"].value = 0.25
-            if "u_dustArmOffset" in self.dust_program: self.dust_program["u_dustArmOffset"].value = -0.12
-            if "u_dustNoiseScale" in self.dust_program: self.dust_program["u_dustNoiseScale"].value = 0.8
-            if "u_dustDensity" in self.dust_program: self.dust_program["u_dustDensity"].value = 2.5
-            
-            # New upgraded dust params
-            if "u_dustHeightScale" in self.dust_program: self.dust_program["u_dustHeightScale"].value = 1.0
-            if "u_dustLaneWidth" in self.dust_program: self.dust_program["u_dustLaneWidth"].value = 0.06
-            if "u_dustDiffuseWidth" in self.dust_program: self.dust_program["u_dustDiffuseWidth"].value = 0.18
-            if "u_camDist" in self.dust_program: self.dust_program["u_camDist"].value = dist
-            
-            self.dust_vao.render(mode=self.ctx.TRIANGLE_STRIP)
 
-        # ----------------------------------------------------------
-        # PASS 1.6: Galaxy Nebulae (quarter-res)
-        # ----------------------------------------------------------
         nebula_weight = 0.0
         if dist > 8.0:
             if dist < 12.0:
@@ -924,52 +932,77 @@ class MilkyWaySimulation(mglw.WindowConfig):
             else:
                 nebula_weight = 1.0
         nebula_weight *= (1.0 - galaxy_far_weight)
-                
+
         self.ctx.disable(self.ctx.BLEND)
         self.ctx.disable(self.ctx.DEPTH_TEST)
-        # Clear emission/transmittance and front depth independently:
-        # color=(0,0,0,1) [zero emission, full transmittance], depth=1.0 [no hit]
+        self.dust_fbo.use()
+        self.ctx.clear(1.0, 1.0, 1.0, 1.0)
+        self.ism_bins_fbo.use()
+        self.ctx.clear(0.0, 0.0, 0.0, 0.0)
         self.nebula_col_fbo.use()
         self.ctx.clear(0.0, 0.0, 0.0, 1.0)
         self.nebula_depth_fbo.use()
         self.ctx.clear(1.0, 1.0, 1.0, 1.0)
-        self.nebula_fbo.use()
-        
-        if nebula_weight > 0.001:
-            vp = self.camera.get_projection_matrix(bh.aspect_ratio) * self.camera.get_view_matrix()
-            if "u_camPos" in self.nebula_program:
-                self.nebula_program["u_camPos"].value = self.camera.get_position()
-            if "u_invVP" in self.nebula_program:
-                self.nebula_program["u_invVP"].write(glm.inverse(vp))
-            if "u_nebulaWeight" in self.nebula_program:
-                self.nebula_program["u_nebulaWeight"].value = nebula_weight
-            if "u_galaxyModel" in self.nebula_program:
-                inv_model = glm.rotate(glm.mat4(1.0), -self.galaxy_rotation_angle, glm.vec3(0.0, 1.0, 0.0))
-                self.nebula_program["u_galaxyModel"].write(inv_model)
-            if "u_camDist" in self.nebula_program:
-                self.nebula_program["u_camDist"].value = dist
-                
-            self.nebula_vao.render(mode=self.ctx.TRIANGLE_STRIP)
+
+        vp = self.camera.get_projection_matrix(bh.aspect_ratio) * self.camera.get_view_matrix()
+        inv_model = glm.rotate(glm.mat4(1.0), -self.galaxy_rotation_angle, glm.vec3(0.0, 1.0, 0.0))
+
+        if dust_weight > 0.001 or nebula_weight > 0.001:
+            self.ism_fbo.use()
+            self.ism.bind_textures(self.dust_program, base_unit=0)
+            if "u_camPos" in self.dust_program:
+                self.dust_program["u_camPos"].value = self.camera.get_position()
+            if "u_invVP" in self.dust_program:
+                self.dust_program["u_invVP"].write(glm.inverse(vp))
+            if "u_dustWeight" in self.dust_program:
+                self.dust_program["u_dustWeight"].value = dust_weight
+            if "u_nebulaWeight" in self.dust_program:
+                self.dust_program["u_nebulaWeight"].value = nebula_weight
+            if "u_unifiedISM" in self.dust_program:
+                self.dust_program["u_unifiedISM"].value = 1
+            if "u_galaxyModel" in self.dust_program:
+                self.dust_program["u_galaxyModel"].write(inv_model)
+
+            # Dust tunable params
+            if "u_dustOpacity" in self.dust_program: self.dust_program["u_dustOpacity"].value = 1.2
+            if "u_dustWidth" in self.dust_program: self.dust_program["u_dustWidth"].value = 0.25
+            if "u_dustArmOffset" in self.dust_program: self.dust_program["u_dustArmOffset"].value = -0.12
+            if "u_dustNoiseScale" in self.dust_program: self.dust_program["u_dustNoiseScale"].value = 0.8
+            if "u_dustDensity" in self.dust_program: self.dust_program["u_dustDensity"].value = 2.5
+            if "u_dustHeightScale" in self.dust_program: self.dust_program["u_dustHeightScale"].value = 1.0
+            if "u_dustLaneWidth" in self.dust_program: self.dust_program["u_dustLaneWidth"].value = 0.06
+            if "u_dustDiffuseWidth" in self.dust_program: self.dust_program["u_dustDiffuseWidth"].value = 0.18
+            if "u_camDist" in self.dust_program: self.dust_program["u_camDist"].value = dist
+
+            self.dust_vao.render(mode=self.ctx.TRIANGLE_STRIP)
 
         # ----------------------------------------------------------
         # PASS 1.75: Composite dust & nebulae onto scene
         # ----------------------------------------------------------
         self.comp_fbo.use()
+        ctx_cam_pos = self.camera.get_position()
         self.ctx.clear(0.0, 0.0, 0.0, 1.0)
         self.ctx.disable(self.ctx.BLEND)
-        
+
         self.scene_tex.use(location=0)
         self.dust_tex.use(location=1)
-        self.scene_depth_tex = self.depth_tex
-        self.scene_depth_tex.use(location=4)
         self.nebula_col_tex.use(location=2)
         self.nebula_depth_tex.use(location=3)
-        
+        self.scene_depth_tex = self.depth_tex
+        self.scene_depth_tex.use(location=4)
+        self.ism_bins_tex.use(location=5)
+
         self.comp_program["u_scene"].value = 0
         self.comp_program["u_dust"].value = 1
         self.comp_program["u_nebulaColor"].value = 2
         self.comp_program["u_nebulaDepth"].value = 3
         self.comp_program["u_sceneDepth"].value = 4
+        if "u_ismBins" in self.comp_program:
+            self.comp_program["u_ismBins"].value = 5
+        if "u_useUnifiedISM" in self.comp_program:
+            self.comp_program["u_useUnifiedISM"].value = 1
+        if "u_galaxyModel" in self.comp_program:
+            self.comp_program["u_galaxyModel"].write(inv_model)
         if "u_debugDust" in self.comp_program:
             self.comp_program["u_debugDust"].value = self.debug_dust
         if "u_debugNebula" in self.comp_program:
@@ -979,7 +1012,7 @@ class MilkyWaySimulation(mglw.WindowConfig):
         if "u_farPlane" in self.comp_program:
             self.comp_program["u_farPlane"].value = 10000.0
         if "u_camPos" in self.comp_program:
-            self.comp_program["u_camPos"].value = self.camera.get_position()
+            self.comp_program["u_camPos"].value = ctx_cam_pos
         if "u_camForward" in self.comp_program:
             self.comp_program["u_camForward"].value = self.camera.get_forward()
         if "u_invVP" in self.comp_program:
@@ -1083,6 +1116,15 @@ class MilkyWaySimulation(mglw.WindowConfig):
                 bh.aspect_ratio,
                 self.galaxy_rotation_angle
             )
+
+        # ----------------------------------------------------------
+        # PASS 4: Sagittarius A* S-Star Identification Overlay (Key Y)
+        # ----------------------------------------------------------
+        self.s_stars.render_overlay(
+            self.camera,
+            bh.aspect_ratio,
+            self.wnd.size,
+        )
 
 
 if __name__ == "__main__":

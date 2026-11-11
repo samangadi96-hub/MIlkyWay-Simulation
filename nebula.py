@@ -8,6 +8,7 @@ class NebulaManager:
         rng = np.random.default_rng(self.seed)
         
         self.nebulae_data = [] # List of dicts for shader uniforms
+        self.nebulae_meta = [] # Physical spiral-arm metadata per nebula (for ISM parent-child coupling)
         self.stars_data = []   # List of stars to add to galactic disk
         
         # Spiral Parameters (must match galactic_disk.py exactly)
@@ -106,6 +107,22 @@ class NebulaManager:
                 'position': [x, y, z, radius],
                 'color': [c[0], c[1], c[2], density * emission_strength]
             })
+            self.nebulae_meta.append({
+                'index': i,
+                'arm_index': int(arm_index),
+                'r': float(r),
+                'theta': float(theta),
+                'ideal_theta': float(ideal_theta),
+                'perp_offset': float(perp_offset),
+                'x': float(x),
+                'y': float(y),
+                'z': float(z),
+                'radius': float(radius),
+                'color': [float(c[0]), float(c[1]), float(c[2])],
+                'strength': float(density * emission_strength),
+                'is_reflection': bool(ref_roll < 0.20),
+                'size_tier': 'hero' if size_roll < 0.10 else ('medium' if size_roll < 0.35 else 'knot'),
+            })
             
             # 3. Generate Young Bright Stars associated with this nebula
             # Create dense star clusters (aggregates) that stand out from the surrounding disk
@@ -149,6 +166,10 @@ class NebulaManager:
     def get_nebulae_regions(self):
         """Reusable interface exposing positions and radii of all star-forming regions."""
         return [{'center': n['position'][:3], 'radius': n['position'][3]} for n in self.nebulae_data]
+
+    def get_nebulae_metadata(self):
+        """Returns physical arm and morphology metadata for all catalogued nebulae."""
+        return self.nebulae_meta
 
     def get_shader_uniforms(self):
         """Returns two flat lists of floats for the shader arrays."""
