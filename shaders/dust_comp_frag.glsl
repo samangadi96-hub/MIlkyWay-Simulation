@@ -26,10 +26,8 @@ void main() {
     vec4 scene = texture(u_scene, uv);
     vec4 dust = texture(u_dust, uv);
     vec4 nebula_col = texture(u_nebulaColor, uv);
-    float nebula_depth_norm = texture(u_nebulaDepth, uv).r;
 
     float dust_trans = dust.r;
-    float dust_depth_norm = dust.g;
 
     if (u_debugDust) {
         fragColor = vec4(dust_trans, dust_trans, dust_trans, 1.0);
@@ -58,20 +56,59 @@ void main() {
     // exactly matching the volume ray distances of dust and nebulae.
     float sceneRayDistance = (rawDepth > 0.9999) ? 10000.0 : (sceneLinearDepth / cosTheta);
 
+    // Validity-weighted 2x2 depth lookup for quarter-res dust & nebula buffers
+    // so hits never blend with empty-sky miss depths (0.0 or 1.0) along silhouettes.
+    ivec2 dustDim = textureSize(u_dust, 0);
+    vec2 dustFCoord = uv * vec2(dustDim) - 0.5;
+    ivec2 dustBase = ivec2(floor(dustFCoord));
+    vec2 dustFrac = clamp(dustFCoord - vec2(dustBase), 0.0, 1.0);
+
+    float dustDepthSum = 0.0;
+    float dustWeightSum = 0.0;
+    for (int dy = 0; dy <= 1; dy++) {
+        for (int dx = 0; dx <= 1; dx++) {
+            ivec2 tc = clamp(dustBase + ivec2(dx, dy), ivec2(0), dustDim - 1);
+            vec4 tap = texelFetch(u_dust, tc, 0);
+            if (tap.r < 0.9995 && tap.g > 0.0001 && tap.g < 0.999) {
+                float wx = (dx == 0) ? (1.0 - dustFrac.x) : dustFrac.x;
+                float wy = (dy == 0) ? (1.0 - dustFrac.y) : dustFrac.y;
+                float w = max(wx * wy, 1e-4);
+                dustDepthSum += tap.g * w;
+                dustWeightSum += w;
+            }
+        }
+    }
+    float dust_depth_norm = (dustWeightSum > 0.0) ? (dustDepthSum / dustWeightSum) : 1.0;
     float dustFrontDepth = dust_depth_norm * 200.0;
-    // We clear to 1.0, so if < 0.999 we hit a nebula
+    bool has_dust = (dustWeightSum > 0.0) && ((1.0 - dust_trans) > 0.001);
+
+    ivec2 nebDim = textureSize(u_nebulaDepth, 0);
+    vec2 nebFCoord = uv * vec2(nebDim) - 0.5;
+    ivec2 nebBase = ivec2(floor(nebFCoord));
+    vec2 nebFrac = clamp(nebFCoord - vec2(nebBase), 0.0, 1.0);
+
+    float nebDepthSum = 0.0;
+    float nebWeightSum = 0.0;
+    for (int dy = 0; dy <= 1; dy++) {
+        for (int dx = 0; dx <= 1; dx++) {
+            ivec2 tc = clamp(nebBase + ivec2(dx, dy), ivec2(0), nebDim - 1);
+            float d_tap = texelFetch(u_nebulaDepth, tc, 0).r;
+            vec4 c_tap = texelFetch(u_nebulaColor, tc, 0);
+            bool neb_hit = (1.0 - c_tap.a > 0.0005 || dot(c_tap.rgb, vec3(1.0)) > 0.0005);
+            if (neb_hit && d_tap < 0.999) {
+                float wx = (dx == 0) ? (1.0 - nebFrac.x) : nebFrac.x;
+                float wy = (dy == 0) ? (1.0 - nebFrac.y) : nebFrac.y;
+                float w = max(wx * wy, 1e-4);
+                nebDepthSum += d_tap * w;
+                nebWeightSum += w;
+            }
+        }
+    }
+    float nebula_depth_norm = (nebWeightSum > 0.0) ? (nebDepthSum / nebWeightSum) : 1.0;
     float nebFrontDepth = nebula_depth_norm * 200.0;
-    
-    bool has_dust = dust_depth_norm > 0.001;
-    bool has_nebula = nebula_depth_norm < 0.999 && (1.0 - nebula_col.a > 0.001 || dot(nebula_col.rgb, vec3(1.0)) > 0.001);
+    bool has_nebula = (nebWeightSum > 0.0) && (1.0 - nebula_col.a > 0.001 || dot(nebula_col.rgb, vec3(1.0)) > 0.001);
     
     // Scene occlusion factors using consistent Euclidean ray distance
-    float dustDepthFactor = 1.0;
-    if (has_dust) {
-        float transitionWidth = dustFrontDepth * 0.15 + 0.5;
-        dustDepthFactor = smoothstep(dustFrontDepth - transitionWidth, dustFrontDepth + transitionWidth * 0.3, sceneRayDistance);
-    }
-    
     float nebDepthFactor = 1.0;
     if (has_nebula) {
         float n_transitionWidth = nebFrontDepth * 0.15 + 0.5;
@@ -81,7 +118,7 @@ void main() {
     // Cardelli, Clayton & Mathis (CCM 1989) astrophysical interstellar extinction law:
     // Wavelength-dependent optical depth produces natural reddening of background starlight:
     // Red transmits most (tau ~ 0.75), Green nominal (tau ~ 1.00), Blue absorbed most (tau ~ 1.35)
-    float t_v = clamp(dust_trans, 0.001, 1.0);
+    float t_v = has_dust ? clamp(dust_trans, 0.001, 1.0) : 1.0;
     vec3 ccm_trans = vec3(
         pow(t_v, 0.75),
         pow(t_v, 1.00),
@@ -121,6 +158,11 @@ void main() {
     }
 
     // Output composited HDR color in RGB, and effective dust transmittance in Alpha
-    // (used by post-processing to protect dark dust silhouettes from bloom wash-out)
-    fragColor = vec4(final_color, t_v);
+    // (used by post-processing to protect dark dust silhouettes while preserving foreground bloom)
+    float eff_bloom_trans = has_dust ? mix(t_v, 1.0, fore_factor * 0.75) : 1.0;
+    if (has_nebula && (!has_dust || nebFrontDepth < dustFrontDepth)) {
+        float neb_glow = clamp(1.0 - nebula_col.a + dot(nebula_col.rgb, vec3(0.333)), 0.0, 1.0);
+        eff_bloom_trans = max(eff_bloom_trans, neb_glow);
+    }
+    fragColor = vec4(final_color, eff_bloom_trans);
 }

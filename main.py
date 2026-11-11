@@ -215,6 +215,24 @@ class MilkyWaySimulation(mglw.WindowConfig):
         )
 
         # ==========================================================
+        # Galaxy 3D-Star Radiance Resolve Shader
+        # ==========================================================
+        with open(BASE_DIR / "shaders" / "galaxy_resolve_vert.glsl", encoding="utf-8") as f:
+            galaxy_resolve_vert = f.read()
+
+        with open(BASE_DIR / "shaders" / "galaxy_resolve_frag.glsl", encoding="utf-8") as f:
+            galaxy_resolve_frag = f.read()
+
+        self.galaxy_resolve_program = self.ctx.program(
+            vertex_shader=galaxy_resolve_vert,
+            fragment_shader=galaxy_resolve_frag,
+        )
+        self.galaxy_resolve_vao = self.ctx.vertex_array(
+            self.galaxy_resolve_program,
+            [(self.quad_buffer, "2f 2f", "in_vert", "in_texcoord")]
+        )
+
+        # ==========================================================
         # Dust Volume Shader (quarter-res)
         # ==========================================================
         with open(BASE_DIR / "shaders" / "dust_vol_vert.glsl", encoding="utf-8") as f:
@@ -311,6 +329,11 @@ class MilkyWaySimulation(mglw.WindowConfig):
             depth_attachment=self.depth_tex
         )
 
+        # Dedicated HDR accumulation buffer for 3D stars prior to soft resolve
+        self.star_tex = self.ctx.texture((width, height), 4, dtype='f2')
+        self.star_tex.filter = (self.ctx.LINEAR, self.ctx.LINEAR)
+        self.star_fbo = self.ctx.framebuffer(color_attachments=[self.star_tex])
+
         # Quarter-resolution FBO for dust pass
         # 2 components (RG16F): R = transmittance, G = front dust depth
         qw, qh = max(width // 4, 1), max(height // 4, 1)
@@ -322,8 +345,10 @@ class MilkyWaySimulation(mglw.WindowConfig):
         self.nebula_col_tex = self.ctx.texture((qw, qh), 4, dtype='f2') # RGBA16F: RGB=Emission, A=Transmittance
         self.nebula_col_tex.filter = (self.ctx.LINEAR, self.ctx.LINEAR)
         self.nebula_depth_tex = self.ctx.texture((qw, qh), 1, dtype='f2') # R16F: Front depth
-        self.nebula_depth_tex.filter = (self.ctx.LINEAR, self.ctx.LINEAR)
+        self.nebula_depth_tex.filter = (self.ctx.NEAREST, self.ctx.NEAREST)
         self.nebula_fbo = self.ctx.framebuffer(color_attachments=[self.nebula_col_tex, self.nebula_depth_tex])
+        self.nebula_col_fbo = self.ctx.framebuffer(color_attachments=[self.nebula_col_tex])
+        self.nebula_depth_fbo = self.ctx.framebuffer(color_attachments=[self.nebula_depth_tex])
 
         # Intermediate composited scene FBO (full res RGBA16F)
         self.comp_tex = self.ctx.texture((width, height), 4, dtype='f2')
@@ -360,10 +385,14 @@ class MilkyWaySimulation(mglw.WindowConfig):
         self.depth_fbo.release()
         self.depth_tex.release()
         self.fbo.release()
+        self.star_tex.release()
+        self.star_fbo.release()
         self.dust_tex.release()
         self.dust_fbo.release()
         self.nebula_col_tex.release()
         self.nebula_depth_tex.release()
+        self.nebula_col_fbo.release()
+        self.nebula_depth_fbo.release()
         self.nebula_fbo.release()
         self.comp_tex.release()
         self.comp_fbo.release()
@@ -572,19 +601,6 @@ class MilkyWaySimulation(mglw.WindowConfig):
         # Render Scene
         # ----------------------------------------------------------
 
-        self.fbo.use()
-        self.ctx.clear(0.0, 0.0, 0.0, 1.0, depth=1.0)
-        
-        # Enable depth test AND depth writes for stars.
-        # This writes the nearest star's depth per pixel, which the dust
-        # composite shader uses for foreground/background occlusion.
-        # Additive blending still works correctly for color output.
-        self.ctx.enable(self.ctx.DEPTH_TEST)
-        self.ctx.depth_mask = True
-        
-        # Use standard additive blending for 3D stars
-        self.ctx.blend_func = (self.ctx.SRC_ALPHA, self.ctx.ONE)
-
         # Calculate black hole screen position (0,0,0) in NDC and compute view-projection matrix
         vp = self.camera.get_projection_matrix(bh.aspect_ratio) * self.camera.get_view_matrix()
         vp_matrix = vp
@@ -728,28 +744,32 @@ class MilkyWaySimulation(mglw.WindowConfig):
         self.ctx.clear(depth=1.0)
         self.ctx.enable(self.ctx.DEPTH_TEST)
         self.ctx.depth_mask = True
+        self.ctx.disable(self.ctx.BLEND)
 
         if star_visibility > 0.001:
             self.galactic_disk.render(
                 self.camera, 
                 bh.aspect_ratio, 
-                1.0, 
+                star_visibility, 
                 self.galaxy_rotation_angle,
-                sim_time=self.sim_time
+                sim_time=self.sim_time,
+                depth_pass=True
             )
             self.bar.render(
                 self.camera, 
                 bh.aspect_ratio, 
-                1.0, 
+                star_visibility, 
                 self.galaxy_rotation_angle,
-                sim_time=self.sim_time
+                sim_time=self.sim_time,
+                depth_pass=True
             )
             self.bulge.render(
                 self.camera, 
                 bh.aspect_ratio, 
-                1.0, 
+                bulge_visibility, 
                 self.galaxy_rotation_angle,
-                sim_time=self.sim_time
+                sim_time=self.sim_time,
+                depth_pass=True
             )
 
         if galaxy_far_weight > 0.001:
@@ -760,7 +780,7 @@ class MilkyWaySimulation(mglw.WindowConfig):
             )
 
         # ----------------------------------------------------------
-        # PASS 1B: Stellar & Far Galaxy Color Accumulation
+        # PASS 1B: Stellar Accumulation + Soft Resolve, then Far Galaxy LOD
         # Additive blending with depth testing disabled: NO star is ever
         # discarded, and overlapping stars never depend on draw order.
         # ----------------------------------------------------------
@@ -768,35 +788,52 @@ class MilkyWaySimulation(mglw.WindowConfig):
         self.ctx.clear(0.0, 0.0, 0.0, 1.0) # Color clear; depth preserved from Pass 1A
         self.ctx.disable(self.ctx.DEPTH_TEST)
         self.ctx.depth_mask = False
-        
-        # Additive blending for 3D stars
-        self.ctx.blend_func = (self.ctx.SRC_ALPHA, self.ctx.ONE)
-        
+
         if star_visibility > 0.001:
+            # Accumulate 3D stars into dedicated HDR buffer and apply gentle soft-shoulder
+            # resolve before black-hole & far-galaxy compositing to prevent nuclear burnout.
+            self.star_fbo.use()
+            self.ctx.clear(0.0, 0.0, 0.0, 0.0)
+            self.ctx.enable(self.ctx.BLEND)
+            self.ctx.blend_func = (self.ctx.SRC_ALPHA, self.ctx.ONE)
+
             self.galactic_disk.render(
                 self.camera, 
                 bh.aspect_ratio, 
                 star_visibility, 
                 self.galaxy_rotation_angle,
-                sim_time=self.sim_time
+                sim_time=self.sim_time,
+                depth_pass=False
             )
             self.bar.render(
                 self.camera, 
                 bh.aspect_ratio, 
                 star_visibility, 
                 self.galaxy_rotation_angle,
-                sim_time=self.sim_time
+                sim_time=self.sim_time,
+                depth_pass=False
             )
             self.bulge.render(
                 self.camera, 
                 bh.aspect_ratio, 
                 bulge_visibility, 
                 self.galaxy_rotation_angle,
-                sim_time=self.sim_time
+                sim_time=self.sim_time,
+                depth_pass=False
             )
+
+            self.fbo.use()
+            self.ctx.disable(self.ctx.BLEND)
+            self.star_tex.use(location=0)
+            self.galaxy_resolve_program["u_galaxyTex"].value = 0
+            self.galaxy_resolve_program["u_knee"].value = 0.95
+            self.galaxy_resolve_program["u_cap"].value = 1.30
+            self.galaxy_resolve_vao.render(mode=self.ctx.TRIANGLE_STRIP)
 
         # Far Galaxy LOD representation on the galactic plane
         if galaxy_far_weight > 0.001:
+            self.fbo.use()
+            self.ctx.enable(self.ctx.BLEND)
             self.far_galaxy.render(
                 self.camera,
                 bh.aspect_ratio,
@@ -808,8 +845,10 @@ class MilkyWaySimulation(mglw.WindowConfig):
         # Post-process passes (Black hole raymarcher)
         # ----------------------------------------------------------
         # Composite mode: StarColor * Transmittance + GasColor * 1.0
+        self.fbo.use()
         self.ctx.disable(self.ctx.DEPTH_TEST)
         self.ctx.depth_mask = False
+        self.ctx.enable(self.ctx.BLEND)
         self.ctx.blend_func = (self.ctx.ONE, self.ctx.SRC_ALPHA)
         
         self.renderer.render(lod_state)
@@ -839,7 +878,7 @@ class MilkyWaySimulation(mglw.WindowConfig):
         dust_weight *= (1.0 - galaxy_far_weight)
         
         self.dust_fbo.use()
-        self.ctx.clear(1.0, 0.0, 0.0, 1.0) # R=1.0 (full transmittance), G=0.0 (no dust depth)
+        self.ctx.clear(1.0, 1.0, 0.0, 1.0) # R=1.0 (full transmittance), G=1.0 (no dust hit)
         self.ctx.disable(self.ctx.BLEND)
         self.ctx.disable(self.ctx.DEPTH_TEST)
         
@@ -886,11 +925,15 @@ class MilkyWaySimulation(mglw.WindowConfig):
                 nebula_weight = 1.0
         nebula_weight *= (1.0 - galaxy_far_weight)
                 
-        self.nebula_fbo.use()
-        # Clear: A=1.0 (transmittance), Depth=0.0
-        self.ctx.clear(0.0, 0.0, 0.0, 1.0) 
         self.ctx.disable(self.ctx.BLEND)
         self.ctx.disable(self.ctx.DEPTH_TEST)
+        # Clear emission/transmittance and front depth independently:
+        # color=(0,0,0,1) [zero emission, full transmittance], depth=1.0 [no hit]
+        self.nebula_col_fbo.use()
+        self.ctx.clear(0.0, 0.0, 0.0, 1.0)
+        self.nebula_depth_fbo.use()
+        self.ctx.clear(1.0, 1.0, 1.0, 1.0)
+        self.nebula_fbo.use()
         
         if nebula_weight > 0.001:
             vp = self.camera.get_projection_matrix(bh.aspect_ratio) * self.camera.get_view_matrix()

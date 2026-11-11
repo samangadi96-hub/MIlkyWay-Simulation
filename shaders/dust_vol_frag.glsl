@@ -308,8 +308,8 @@ void main() {
     // Transmittance: exp(-optical_depth * opacity * weight)
     float final_transmittance = exp(-optical_depth * u_dustOpacity * u_dustWeight);
 
-    // Encode front depth as linear distance, 0.0 means no dust hit
-    float encoded_depth = (front_depth < 0.0) ? 0.0 : front_depth / 200.0;
+    // Encode front depth as linear distance; >= 1.0 means no dust hit
+    float encoded_depth = (front_depth < 0.0) ? 1.0 : clamp(front_depth / 200.0, 0.0002, 0.998);
 
     fragColor = vec4(final_transmittance, encoded_depth, 0.0, 1.0);
 }

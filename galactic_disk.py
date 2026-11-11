@@ -201,14 +201,19 @@ class GalacticDisk:
             )
             self.num_stars += len(nebula_stars)
 
-    def render(self, camera, aspect_ratio, visibility, rotation_angle, sim_time=0.0):
+    def render(self, camera, aspect_ratio, visibility, rotation_angle, sim_time=0.0, depth_pass=False):
         if visibility <= 0.001:
             return
 
         self.ctx.enable(moderngl.PROGRAM_POINT_SIZE)
-        self.ctx.enable(moderngl.BLEND)
-        self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE
+        if depth_pass:
+            self.ctx.disable(moderngl.BLEND)
+        else:
+            self.ctx.enable(moderngl.BLEND)
+            self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE
 
+        if "u_depthPass" in self.program:
+            self.program["u_depthPass"].value = 1 if depth_pass else 0
         if "u_visibility" in self.program:
             self.program["u_visibility"].value = visibility
 
@@ -257,6 +262,8 @@ class GalacticDisk:
 
         # Render nebula-associated stars with coherent pattern speed
         if self.nebula_vao is not None:
+            if "u_depthPass" in self.nebula_program:
+                self.nebula_program["u_depthPass"].value = 1 if depth_pass else 0
             if "u_visibility" in self.nebula_program:
                 self.nebula_program["u_visibility"].value = visibility
             if "u_view" in self.nebula_program:

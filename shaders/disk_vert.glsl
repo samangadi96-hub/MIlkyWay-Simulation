@@ -6,11 +6,13 @@ in float in_size;
 in float in_brightness;
 
 out vec3 v_color;
+out float v_projSize;
 
 uniform mat4 u_model;
 uniform mat4 u_view;
 uniform mat4 u_projection;
 uniform float u_visibility;
+uniform int u_depthPass;
 
 uniform float u_simTime;
 uniform float u_vFlat;
@@ -77,18 +79,10 @@ void main() {
     vec4 view_pos = u_view * world_pos;
     gl_Position = u_projection * view_pos;
     
-    // Size attenuation based on distance
+    // 2. Projected angular/pixel diameter based on distance
     float dist = max(0.1, -view_pos.z);
     float proj_size = in_size * (340.0 / dist);
-    
-    // Flux-conserving subpixel attenuation:
-    // Scale unresolved star contribution with projected coverage to prevent
-    // millions of background stars from accumulating excessive energy.
-    float subpixel_factor = 1.0;
-    if (proj_size < 1.0) {
-        subpixel_factor = clamp(proj_size * proj_size, 0.0005, 1.0);
-    }
-    gl_PointSize = clamp(proj_size, 1.0, 24.0);
+    v_projSize = proj_size;
     
     // Wave proximity factor for astrophysical luminosity enhancement
     // (young OB stars and emission peaks along density wave shock)
@@ -108,6 +102,26 @@ void main() {
         float minor_axis_prox = abs(sin(theta_pat - u_barAnglePolar));
         cavity_att = 1.0 - (1.0 - smoothstep(3.0, 7.5, r)) * (0.85 * minor_axis_prox);
     }
+
+    // 1. Intrinsic stellar luminosity (separate from projected screen coverage)
+    vec3 lum_rgb = star_color * in_brightness * u_visibility * lum_boost * cavity_att;
+
+    if (u_depthPass != 0) {
+        // Depth-only pass: keep sprites tight and cull negligible subpixel specks
+        // so dim foreground halo stars do not punch false holes in dust occlusion.
+        float lum_scalar = dot(lum_rgb, vec3(0.2126, 0.7152, 0.0722));
+        float est_peak = lum_scalar * min(1.0, proj_size * proj_size);
+        if (est_peak < 0.025) {
+            gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+            gl_PointSize = 1.0;
+        } else {
+            gl_PointSize = clamp(proj_size, 1.0, 24.0);
+        }
+    } else {
+        // Clamp point size >= 2.0 px for flicker-free subpixel anti-aliasing;
+        // fragment shader handles flux-conserving coverage and PSF normalization.
+        gl_PointSize = clamp(proj_size, 2.0, 24.0);
+    }
     
-    v_color = star_color * in_brightness * u_visibility * subpixel_factor * lum_boost * cavity_att;
+    v_color = lum_rgb;
 }
