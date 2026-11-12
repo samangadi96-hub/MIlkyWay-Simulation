@@ -213,7 +213,21 @@ class FarGalaxy:
         SPIRAL_TIGHTNESS = 2.5
         INNER_ARM_R = 3.5
         BAR_ANGLE = 0.488
-        ARM_BASE_OFFSET = (math.pi / 2.0 - 0.488) - SPIRAL_TIGHTNESS * math.log(7.0 / INNER_ARM_R)
+        BAR_ANGLE_POLAR = math.pi / 2.0 - BAR_ANGLE
+        ARM_BASE_OFFSET = BAR_ANGLE_POLAR - SPIRAL_TIGHTNESS * math.log(7.0 / INNER_ARM_R)
+
+        # Gentle broad inter-bar resonance cavity along bar minor axis (r < 9.5):
+        # Prevents diffuse inner-disk haze from washing out the realistic bar while
+        # transitioning smoothly into the inner spiral arms without dark pinch artifacts.
+        r_diff = np.sqrt(x_diff * x_diff + z_diff * z_diff)
+        th_diff = np.arctan2(z_diff, x_diff)
+        minor_prox = np.abs(np.sin(th_diff - BAR_ANGLE_POLAR))
+        cavity_att = np.where(
+            r_diff < 9.5,
+            1.0 - (1.0 - smoothstep_np(5.0, 9.5, r_diff)) * (0.52 * minor_prox),
+            1.0,
+        )
+        lum_diff_cav = lum_diff * cavity_att
 
         r_clamped = np.maximum(r_arm_stars, INNER_ARM_R)
         arm_spine = ARM_BASE_OFFSET + SPIRAL_TIGHTNESS * np.log(r_clamped / INNER_ARM_R)
@@ -228,7 +242,7 @@ class FarGalaxy:
 
         # Deposit 3D Stellar Components
         arm_vr, arm_vg, arm_vb = deposit_stars_3d(x_arm, y_arm, z_arm, rgb_arm, lum_arm_gated)
-        diff_vr, diff_vg, diff_vb = deposit_stars_3d(x_diff, y_diff, z_diff, rgb_diff, lum_diff)
+        diff_vr, diff_vg, diff_vb = deposit_stars_3d(x_diff, y_diff, z_diff, rgb_diff, lum_diff_cav)
         bar_vr, bar_vg, bar_vb = deposit_stars_3d(d_bar[:, 0], d_bar[:, 1], d_bar[:, 2], d_bar[:, 3:6], d_bar[:, 7])
         bulge_vr, bulge_vg, bulge_vb = deposit_stars_3d(d_bulge[:, 0], d_bulge[:, 1], d_bulge[:, 2], d_bulge[:, 3:6], d_bulge[:, 7])
 
@@ -264,33 +278,43 @@ class FarGalaxy:
         diff_g = fft_blur_3d(diff_vg, 5.0) * 0.22
         diff_b = fft_blur_3d(diff_vb, 5.0) * 0.26
 
-        # 3. Bar: Crisp elongated spine (sigma=1.2) + subtle body (sigma=2.6)
-        # Preserves authentic peanut lobes (|y| ~ 0.8 - 1.4) and slender aspect ratio
-        bar_s_r = fft_blur_3d(bar_vr, 1.2)
-        bar_s_g = fft_blur_3d(bar_vg, 1.2)
-        bar_s_b = fft_blur_3d(bar_vb, 1.2)
-        bar_m_r = fft_blur_3d(bar_vr, 2.6)
-        bar_m_g = fft_blur_3d(bar_vg, 2.6)
-        bar_m_b = fft_blur_3d(bar_vb, 2.6)
-        bar_raw_r = bar_s_r * 0.65 + bar_m_r * 0.35
-        bar_raw_g = bar_s_g * 0.65 + bar_m_g * 0.35
-        bar_raw_b = bar_s_b * 0.65 + bar_m_b * 0.35
+        # 3. Bar: Balanced multi-scale spine + soft body + gentle core-to-tip gradient
+        # Avoids flat highlight clipping/neon-yellow blowout at maximum zoom-out while
+        # preserving authentic peanut lobes (|y| ~ 0.8 - 1.4) and inner-arm connection.
+        bar_s_r = fft_blur_3d(bar_vr, 1.5)
+        bar_s_g = fft_blur_3d(bar_vg, 1.5)
+        bar_s_b = fft_blur_3d(bar_vb, 1.5)
+        bar_m_r = fft_blur_3d(bar_vr, 3.0)
+        bar_m_g = fft_blur_3d(bar_vg, 3.0)
+        bar_m_b = fft_blur_3d(bar_vb, 3.0)
+        bar_w_r = fft_blur_3d(bar_vr, 5.2)
+        bar_w_g = fft_blur_3d(bar_vg, 5.2)
+        bar_w_b = fft_blur_3d(bar_vb, 5.2)
+        bar_raw_r = bar_s_r * 0.32 + bar_m_r * 0.38 + bar_w_r * 0.30
+        bar_raw_g = bar_s_g * 0.32 + bar_m_g * 0.38 + bar_w_g * 0.30
+        bar_raw_b = bar_s_b * 0.32 + bar_m_b * 0.38 + bar_w_b * 0.30
 
         bar_lum = np.sqrt(bar_raw_r**2 + bar_raw_g**2 + bar_raw_b**2)
-        bar_scale = 1.0 / (1.0 + bar_lum * 0.12)
-        bar_r = bar_raw_r * bar_scale * 4.2 * 1.42
-        bar_g = bar_raw_g * bar_scale * 4.2 * 1.18
-        bar_b = bar_raw_b * bar_scale * 4.2 * 0.60
+        bar_scale = 1.0 / (1.0 + bar_lum * 0.005)
+        bar_r = bar_raw_r * bar_scale * 0.100 * 1.26
+        bar_g = bar_raw_g * bar_scale * 0.100 * 1.12
+        bar_b = bar_raw_b * bar_scale * 0.100 * 0.80
 
-        # 4. Central Nuclear Bulge: tight compact spheroidal core peaking around Sgr A*
-        bulge_s_r = fft_blur_3d(bulge_vr, 1.0)
-        bulge_s_g = fft_blur_3d(bulge_vg, 1.0)
-        bulge_s_b = fft_blur_3d(bulge_vb, 1.0)
-        bulge_lum = np.sqrt(bulge_s_r**2 + bulge_s_g**2 + bulge_s_b**2)
-        bulge_scale = 1.0 / (1.0 + bulge_lum * 0.10)
-        bulge_r = bulge_s_r * bulge_scale * 1.25 * 1.42
-        bulge_g = bulge_s_g * bulge_scale * 1.25 * 1.25
-        bulge_b = bulge_s_b * bulge_scale * 1.25 * 0.88
+        # 4. Central Nuclear Bulge: warm spheroidal core peaking softly around Sgr A*
+        bulge_s_r = fft_blur_3d(bulge_vr, 1.1)
+        bulge_s_g = fft_blur_3d(bulge_vg, 1.1)
+        bulge_s_b = fft_blur_3d(bulge_vb, 1.1)
+        bulge_m_r = fft_blur_3d(bulge_vr, 2.8)
+        bulge_m_g = fft_blur_3d(bulge_vg, 2.8)
+        bulge_m_b = fft_blur_3d(bulge_vb, 2.8)
+        bulge_raw_r = bulge_s_r * 0.65 + bulge_m_r * 0.35
+        bulge_raw_g = bulge_s_g * 0.65 + bulge_m_g * 0.35
+        bulge_raw_b = bulge_s_b * 0.65 + bulge_m_b * 0.35
+        bulge_lum = np.sqrt(bulge_raw_r**2 + bulge_raw_g**2 + bulge_raw_b**2)
+        bulge_scale = 1.0 / (1.0 + bulge_lum * 0.15)
+        bulge_r = bulge_raw_r * bulge_scale * 0.74 * 1.36
+        bulge_g = bulge_raw_g * bulge_scale * 0.74 * 1.22
+        bulge_b = bulge_raw_b * bulge_scale * 0.74 * 0.90
 
         # Combine stellar components
         stars_r = arm_r + diff_r + bar_r + bulge_r
@@ -303,11 +327,12 @@ class FarGalaxy:
         stars_g *= outer_mask[None, :, :]
         stars_b *= outer_mask[None, :, :]
 
-        # Calibrate total column brightness (preserving Reference A peak surface brightness ~8.5)
-        col_sum = np.sum(stars_r + stars_g + stars_b, axis=0)
+        # Calibrate total column brightness anchored to baseline disk/arm exposure
+        # (prevents lower central bar brightness from inflating spiral arm normalization)
         col_lum = np.sqrt(np.sum(stars_r**2 + stars_g**2 + stars_b**2, axis=0))
         target_peak = 8.5
-        col_scale = (target_peak / (col_lum.max() + 1e-6)) * (1.0 / (1.0 + col_lum * 0.04)) * 3.6
+        ref_peak = max(float(col_lum.max()), 133.261)
+        col_scale = (target_peak / (ref_peak + 1e-6)) * (1.0 / (1.0 + col_lum * 0.04)) * 3.6
 
         stars_r *= col_scale[None, :, :]
         stars_g *= col_scale[None, :, :]
@@ -366,15 +391,18 @@ class FarGalaxy:
             lane_combined = (core_lane + sub_lane) * np.clip(wisp_mod, 0.20, 1.80)
             arm_dust_total += lane_combined * smoothstep_np(r_start - 0.5, r_start + 1.2, R) * (R <= 42.0)
 
-        # Bar leading edge dust lanes
+        # Curved leading-edge bar dust shocks (domain-warped & smoothly tapered, matching ISM)
         sin_b = math.sin(BAR_ANGLE)
         cos_b = math.cos(BAR_ANGLE)
-        u_bar = X * sin_b + Z * cos_b
-        v_bar = -X * cos_b + Z * sin_b
-        v_leading = -0.42 * np.sign(u_bar)
-        dist_bar_dust = np.abs(v_bar - v_leading)
-        bar_dust_mask = (np.abs(u_bar) > 1.2) & (np.abs(u_bar) < 6.6)
-        bar_dust = np.exp(-0.5 * (dist_bar_dust / 0.26)**2) * bar_dust_mask * 1.10
+        u_bar = X_warped * sin_b + Z_warped * cos_b
+        v_bar = -X_warped * cos_b + Z_warped * sin_b
+        u_abs = np.abs(u_bar)
+        tip_bend = np.sign(u_bar) * smoothstep_np(4.2, 7.2, u_abs) * 0.45 * np.maximum(0.0, u_abs - 4.2)
+        v_shock = np.sign(u_bar) * (0.36 + 0.18 * smoothstep_np(1.6, 5.2, u_abs)) + tip_bend
+        w_shock = 0.40 + 0.20 * smoothstep_np(1.5, 6.5, u_abs)
+        bar_env_u = smoothstep_np(1.8, 3.2, u_abs) * (1.0 - smoothstep_np(6.0, 7.5, u_abs))
+        bar_mod = np.clip(0.70 + 0.45 * noise_dust, 0.25, 1.40)
+        bar_dust = np.exp(-0.5 * ((v_bar - v_shock) / w_shock)**2) * bar_env_u * bar_mod * 0.36
 
         tau_col = (arm_dust_total + bar_dust) * outer_mask
 
