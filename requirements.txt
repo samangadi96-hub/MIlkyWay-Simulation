@@ -3,3 +3,4 @@ moderngl-window>=2.4.0
 numpy>=1.26.0
 pyglet>=2.0.0
 PyGLM>=2.7.0
+Pillow>=10.0.0

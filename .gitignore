@@ -1,0 +1,12 @@
+﻿# Python generated files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+/venv/
+/.venv/
+
+# Generated renders and outputs
+/test_renders/
+/renders/

@@ -35,7 +35,7 @@ vec3 get_stars(vec2 p) {
     vec2 id = floor(p * 90.0);
     vec2 f = fract(p * 90.0);
     float star = smoothstep(0.96, 1.0, hash(id));
-    star *= smoothstep(0.5, 0.1, length(f - 0.5));
+    star *= 1.0 - smoothstep(0.1, 0.5, length(f - 0.5));
     vec3 color = mix(vec3(0.6, 0.8, 1.0), vec3(1.0, 0.7, 0.4), hash(id + 1.0));
     return color * star * 4.0; 
 }
@@ -83,7 +83,7 @@ void main() {
             
             // 1. Photon Ring / Inner Ring (approx 2.6 to 4.5)
             float ring_mask = smoothstep(inner_r, 3.5, disk_r) * (1.0 - smoothstep(3.5, 4.5, disk_r));
-            vec3 ring_color = mix(vec3(1.0, 0.4, 0.0), vec3(1.0, 0.95, 0.8), smoothstep(4.0, 3.0, disk_r));
+            vec3 ring_color = mix(vec3(1.0, 0.4, 0.0), vec3(1.0, 0.95, 0.8), 1.0 - smoothstep(3.0, 4.0, disk_r));
             final_disk_color += ring_color * ring_mask;
             final_alpha += ring_mask * 0.9;
             
